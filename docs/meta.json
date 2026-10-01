@@ -1,0 +1,12 @@
+{
+  "title": "JavaScript SDK",
+  "icon": "Braces",
+  "root": true,
+  "pages": [
+    "index",
+    "quickstart",
+    "guides",
+    "concepts",
+    "reference"
+  ]
+}

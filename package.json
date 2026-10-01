@@ -1,0 +1,68 @@
+{
+  "name": "@vorq-ai/client-sdk",
+  "version": "0.1.0-rc.1",
+  "description": "JavaScript and TypeScript client for the VORQ inference exchange",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vorq-ai/vorq-client-sdk-js.git"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "browser": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "node": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "default": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "typecheck": "tsc",
+    "test": "vitest run",
+    "test:node": "vitest run --project node",
+    "test:browser": "vitest run --project browser",
+    "check:package": "npm run build && node scripts/check-package.mjs",
+    "check:install": "node scripts/check-install.mjs",
+    "smoke": "npm run build && node scripts/smoke.mjs",
+    "smoke:batch": "npm run build && node scripts/smoke-batch.mjs",
+    "smoke:openai": "npm run build && node scripts/smoke-openai.mjs"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.4.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "viem": "^2.57.2"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "condition-probe": "file:./test/fixtures/condition-probe",
+    "openai": "^7.25.0",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  }
+}

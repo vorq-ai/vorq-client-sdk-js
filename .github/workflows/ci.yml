@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# This job publishes nothing and needs no write scope; without this it would
+# inherit whatever the repository default token permission is.
+permissions:
+  contents: read
+
+# A push that supersedes an in-flight run of the same ref makes that run's
+# result irrelevant, so cancel it rather than paying for it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx tsc --noEmit
+      # `test:node` is where the vector conformance tests and the
+      # cross-language round trip already live — `test/vectors.test.ts` and
+      # `test/crosslang.test.ts` are both in that project. No separate step for
+      # them; adding one would run them twice.
+      - run: npm run test:node
+      # The browser project resolves under the `browser` export condition with
+      # `node` out of it: this is where a module reaching a bundle it must never
+      # reach fails, as a resolution error.
+      - run: npm run test:browser
+      - run: npm run build
+      # The build-dependent half of the packaging gate. Needs the build above;
+      # it refuses to pass when `dist/` is absent rather than passing vacuously.
+      - run: node scripts/check-package.mjs

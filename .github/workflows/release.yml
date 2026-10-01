@@ -1,0 +1,63 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+  id-token: write        # npm provenance signs against this
+
+# A tag is published once. Two runs of the same tag racing each other would
+# race on the registry, so the later one waits rather than being cancelled —
+# cancelling a half-finished publish is worse than serializing.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm run test:node
+      - run: npm run test:browser
+      - run: npm run build
+      # `--expect-version` is what stops a tag from publishing a version nobody
+      # bumped: the tag name must equal `v` + package.json's version.
+      #
+      # The tag reaches the shell through the environment, never through `${{ }}`
+      # interpolation into the script. `git check-ref-format` accepts tag names
+      # containing `$(…)`, backticks and quotes, and a `${{ }}` expansion is a
+      # textual substitution performed before the shell ever sees the line — so
+      # interpolating it here would let a crafted tag run arbitrary commands in
+      # a job that holds NODE_AUTH_TOKEN and an OIDC signing identity.
+      - name: check package
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: node scripts/check-package.mjs --expect-version "$REF_NAME"
+      # The consumer's-eye view (R18): pack, install elsewhere, import through
+      # the published `exports` map, and bundle it. Release-time only — it
+      # needs the network and a real bundler.
+      - run: node scripts/check-install.mjs
+      - name: publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          # A version carrying a prerelease identifier goes to the `next` tag,
+          # never to `latest`, so an `npm install @vorq-ai/client-sdk` cannot pick
+          # one up by accident. The step above has already established that
+          # "$REF_NAME" is exactly `v` + the manifest version, so this branches
+          # on the same string the version check passed on.
+          case "$REF_NAME" in
+            *-*) npm publish --provenance --access public --tag next ;;
+            *)   npm publish --provenance --access public ;;
+          esac

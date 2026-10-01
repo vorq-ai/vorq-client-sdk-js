@@ -1,0 +1,12 @@
+{
+  "title": "Guides",
+  "pages": [
+    "use-a-browser-wallet",
+    "persist-and-resume-jobs",
+    "generate-images-and-video",
+    "post-an-open-order",
+    "submit-a-batch",
+    "create-embeddings",
+    "use-the-openai-package"
+  ]
+}
