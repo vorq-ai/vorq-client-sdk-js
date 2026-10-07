@@ -14,17 +14,27 @@ Each line is an OpenAI-style batch request. Put the model in `body`:
 const requests = prompts.map((prompt, i) => ({
   custom_id: `row-${i}`,             // optional, 1–64 characters, unique in the batch
   url: "/v1/responses",              // or "/v1/embeddings"; one endpoint per batch
-  body: { model: "moonshotai/kimi-k3", input: prompt, max_output_tokens: 512 },
+  body: { model: "moonshotai/kimi-k3", input: prompt, max_output_tokens: 512, max_rate_in: "0.6" },
 }));
 ```
 
-- `body.model` is required. `body.rate_in`, `body.rate_out` and `body.units_out` are order terms,
-  taken out of the body; everything else in `body` is the model input.
-- A line with neither rate takes the market. Before sealing, the client asks the coordinator for
-  a plan: which providers take how many of those lines, and at which ask. A provider is never
-  given more lines than its on-chain capacity leaves free, and each line is pinned to the
-  provider it was planned to. If the network cannot take all of a model's unpriced lines in the
-  window, `submit` raises `ValidationError` before anything is signed.
+`max_rate_in` on a line protects it from being overcharged: the line never signs an input rate
+above it, and pays less when its provider asks less. It is worth setting on every batch,
+because a batch signs and pays for all of its lines in one call, before you see what any of
+them was priced at. It caps the input side only; add `max_rate_out` to cap the output side too.
+Set it too low and no provider matches: the line [rests](../reference/submit.md#how-the-rates-are-chosen) and may expire without being
+served.
+
+- `body.model` is required. `body.max_rate_in`, `body.max_rate_out` and `body.units_out` are
+  order terms, taken out of the body; everything else in `body` is the model input. The
+  ceilings are optional.
+- Before sealing, the client asks the coordinator for a plan: which providers within each
+  line's ceilings take how many lines, and at which ask. A provider is never given more lines
+  than its on-chain capacity leaves free, and each planned line signs its provider's ask and is
+  pinned to it.
+- A line the plan cannot place rests at its ceilings, with the market rate on a side that names
+  none. A line with no ceiling cannot rest: if the network cannot take all such lines of a
+  model in the window, `submit` raises `ValidationError` before anything is signed.
 - `url` defaults to `/v1/responses`. `method` is ignored.
 - `requests` may also be a JSONL string of such lines.
 
@@ -35,9 +45,9 @@ const batch = await client.batches.submit(requests, "24h", { providers: [] });
 await store.put(batch.id, { jobIds: batch.jobIds });   // keep both before waiting
 ```
 
-- **`providers`** is required and applies to priced lines only; unpriced lines go where the plan
-  puts them. Priced lines are assigned round-robin across the list, each sealed to its own
-  provider. With an empty list (`{ providers: [] }`) every priced line is an
+- **`providers`** is required and applies to resting lines only; planned lines go where the plan
+  puts them. Resting lines are assigned round-robin across the list, each sealed to its own
+  provider. With an empty list (`{ providers: [] }`) every resting line is an
   [open order](./post-an-open-order.md), which needs a client built with a `verifier`.
 - The window is `"1h"` / `"24h"`, or the tier names `"async"` / `"batch"`; it defaults to
   `"24h"`.

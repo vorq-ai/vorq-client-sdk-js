@@ -340,7 +340,7 @@ function checkUint(value: number | bigint, field: string, ceiling: bigint): void
 
 /**
  * A rate — USD per 1M units of work, as a decimal string — in atomic token units
- * per `RATE_SCALE` units, defaulting to zero.
+ * per `RATE_SCALE` units.
  *
  * `RATE_SCALE` is 10^6 units, so the conversion is the plain USD one:
  * `"0.05"` at 6 decimals signs `50000`. A number or a bigint is refused rather
@@ -349,7 +349,6 @@ function checkUint(value: number | bigint, field: string, ceiling: bigint): void
  * rounded.
  */
 export function parseRate(value: unknown, field: string, decimals: number): bigint {
-  if (value === null || value === undefined) return 0n;
   const refuse = (detail: string): never => {
     throw new ValidationError(
       `${field}=${typeof value === "bigint" ? `${value}n` : JSON.stringify(value)} is not a rate: ` +
@@ -366,6 +365,11 @@ export function parseRate(value: unknown, field: string, decimals: number): bigi
   }
   if (atomic > UINT128_MAX) return refuse(" (past the chain's uint128)");
   return atomic;
+}
+
+/** A ceiling a caller may leave out: `null` for none, else the rate `parseRate` reads. */
+export function parseCeiling(value: unknown, field: string, decimals: number): bigint | null {
+  return value === null || value === undefined ? null : parseRate(value, field, decimals);
 }
 
 export interface OrderTermsFields {

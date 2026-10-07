@@ -107,8 +107,8 @@ const handle = await client.submit({
   model: ask.model,
   input: prompt,
   sla,
-  rateIn: ask.rateIn,
-  rateOut: ask.rateOut,
+  maxRateIn: ask.rateIn,
+  maxRateOut: ask.rateOut,
   provider,
   ...(customId === null ? {} : { customId }),
 });

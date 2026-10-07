@@ -16,7 +16,7 @@ const handle = await client.submit({
   model: "black-forest-labs/flux-2-dev:fp8",
   input: { prompt: "a lighthouse in fog, oil painting", width: 1024, height: 768, seed: 42 },
   sla: "batch",
-  rateOut: "0.02",       // USD per 1M output pixels
+  maxRateOut: "0.02",    // USD per 1M output pixels
   provider: 7,
 });
 ```
@@ -33,7 +33,7 @@ const handle = await client.submit({
   model: videoModel,
   input: { prompt: "a slow pan across the valley", resolution: "720p", aspect_ratio: "16:9", duration: 5 },
   sla: "batch",
-  rateOut,
+  maxRateOut,
   provider,
 });
 ```
@@ -66,8 +66,8 @@ const handle = await client.submit({
     duration: 5,
   },
   sla: "batch",
-  rateIn,
-  rateOut,
+  maxRateIn,
+  maxRateOut,
   provider,
 });
 ```

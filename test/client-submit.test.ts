@@ -31,6 +31,7 @@ import {
   baseRoutes,
   client,
   funded,
+  isMarketProbe,
   json,
   marketCandidate,
   marketRoute,
@@ -272,16 +273,67 @@ describe("recipient selection", () => {
   ])("refuses a rate given as %s, naming the unit, before anything is signed", async (_label, rate) => {
     const { client: c, calls } = client(baseRoutes());
     const err = await c
-      .submit({ model: "m", input: "hi", provider: 1, rateIn: rate as string, rateOut: "0.1" })
+      .submit({ model: "m", input: "hi", provider: 1, maxRateIn: rate as string, maxRateOut: "0.1" })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ValidationError);
     expect((err as Error).message).toContain('USD per 1M units as a decimal string, e.g. "0.05"');
     expect(posts(calls)).toHaveLength(0);
   });
 
-  it("sends a USD rate as its canonical string", async () => {
-    const { order } = await sealedByASubmit("hi", { rateIn: "0.050", rateOut: "2" });
-    expect([order.rate_in, order.rate_out]).toEqual(["0.05", "2"]);
+  it("sends a ceiling as its canonical USD string, and signs the ask under it", async () => {
+    const { order, calls } = await sealedByASubmit("hi", { maxRateIn: "0.050", maxRateOut: "2" });
+    expect(probes(calls)[0]!.body).toMatchObject({ max_rate_in: "0.05", max_rate_out: "2" });
+    // Provider 1 asks 0.001 / 0.002: the order pays that, never the ceiling.
+    expect([order.rate_in, order.rate_out]).toEqual(["0.001", "0.002"]);
+  });
+
+  it("signs the ask on both sides when only an input ceiling is named and a provider is within it", async () => {
+    // The output side has no ceiling, so it takes provider 1's own rate, not zero.
+    const { order, calls } = await sealedByASubmit("hi", { maxRateIn: "0.05" });
+    expect(probes(calls)).toHaveLength(1);
+    expect(probes(calls)[0]!.body).not.toHaveProperty("max_rate_out");
+    expect([order.rate_in, order.rate_out, order.designated]).toEqual(["0.001", "0.002", 1]);
+  });
+
+  it("rests an order nobody is within at its ceiling, and the market rate on the unnamed side", async () => {
+    // Provider 1 asks 0.001 on input, above the ceiling. An order signs both
+    // rates, so a second probe that names no ceiling supplies the output side.
+    const { order, calls } = await sealedByASubmit("hi", { maxRateIn: "0.0005" });
+    const [ceiling, market] = probes(calls).map((c) => c.body as Record<string, unknown>);
+    expect(ceiling).toMatchObject({ max_rate_in: "0.0005" });
+    expect(ceiling).not.toHaveProperty("max_rate_out");
+    expect(market).not.toHaveProperty("max_rate_in");
+    expect([order.rate_in, order.rate_out, order.designated]).toEqual(["0.0005", "0.002", 1]);
+  });
+
+  it("rests an order nobody is within at both ceilings, with one probe", async () => {
+    const { order, calls } = await sealedByASubmit("hi", { maxRateIn: "0.0005", maxRateOut: "0.0007" });
+    expect(probes(calls)).toHaveLength(1);
+    expect([order.rate_in, order.rate_out]).toEqual(["0.0005", "0.0007"]);
+  });
+
+  it("refuses one ceiling with no live ask to take the other side from", async () => {
+    const { client: c, calls } = client([marketRoute([]), ...baseRoutes()]);
+    const err = await c
+      .submit({ model: "m", input: "hi", provider: 1, maxRateIn: "0.0005" })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ValidationError);
+    expect((err as Error).message).toMatch(/provider 1 is not serving m/);
+    expect(probes(calls)).toHaveLength(2);
+    expect(posts(calls)).toHaveLength(0);
+  });
+
+  it("refuses a candidate the node names above a ceiling", async () => {
+    // The node filters by the ceilings; one that did not is not signed for.
+    const unfiltered: Route = [
+      /\/v1\/jobs$/,
+      (_n, body) => (isMarketProbe(body) ? json({ candidates: [marketCandidate(1)] }, 402) : null),
+    ];
+    const { client: c, calls } = client([unfiltered, ...baseRoutes()]);
+    await expect(
+      c.submit({ model: "m", input: "hi", provider: 1, maxRateIn: "0.0005" }),
+    ).rejects.toThrow(/above the ceilings/);
+    expect(posts(calls)).toHaveLength(0);
   });
 
   it("refuses an open order until spec 07 (R5)", async () => {
@@ -290,7 +342,7 @@ describe("recipient selection", () => {
     // names submit({ provider }) as the remedy. There is no automatic fallback
     // to a designated bid — re-targeting is the caller's decision.
     const { client: c, calls } = client(baseRoutes());
-    const err = await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" }).catch((e: unknown) => e);
+    const err = await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(EscrowKeyUnverified);
     expect((err as Error).message).toMatch(/provider/);
     expect(posts(calls)).toHaveLength(0);
@@ -821,6 +873,8 @@ describe("the two-request exchange", () => {
         payloadInput: { input: "" },
         window: "batch",
         url: "/v1/responses",
+        rateIn: "0",
+        rateOut: "0",
         provider: 1,
         ctx,
       })

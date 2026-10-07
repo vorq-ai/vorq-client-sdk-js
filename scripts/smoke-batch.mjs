@@ -91,7 +91,7 @@ const lines = Array.from({ length: lineCount }, (_, i) => ({
     model: ask.model,
     input: promptTemplate.replaceAll("{i}", String(i)),
     ...(maxOut > 0 ? { max_output_tokens: maxOut } : {}),
-    ...(unpriced ? {} : { rate_in: ask.rateIn, rate_out: ask.rateOut }),
+    ...(unpriced ? {} : { max_rate_in: ask.rateIn, max_rate_out: ask.rateOut }),
   },
 }));
 

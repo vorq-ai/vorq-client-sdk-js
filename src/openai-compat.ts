@@ -421,10 +421,10 @@ export interface SealingFetchOptions {
   signer?: Signer;
   cipher?: Cipher;
   /**
-   * Needed for an open order (a bid named in the `vorq` block, no provider): it
-   * seals to the coordinator's escrow key, and the client will not post one it
-   * cannot verify. A call that names no bid takes the market, pinned to a
-   * provider, and needs none.
+   * Needed for an open order (a ceiling in the `vorq` block that no provider is
+   * within, and no provider named): it seals to the coordinator's escrow key,
+   * and the client will not post one it cannot verify. A call that names no
+   * ceiling is pinned to a provider and needs none.
    */
   verifier?: Verifier | null;
   timeoutMs?: number;
@@ -611,9 +611,9 @@ export function sealingFetch(options: SealingFetchOptions = {}): SealingFetch {
 
     const background = own(body, "background") === true;
     // Everything an order needs that OpenAI's body has no field for: the SLA
-    // window, the bid, and an optional named provider. `rate_in`/`rate_out` are
-    // USD per 1M units as decimal strings; with neither, the order takes the
-    // market (the first ask the node ranks), exactly as `submit` does.
+    // window, the ceilings, and an optional named provider. `max_rate_in` /
+    // `max_rate_out` are USD per 1M units as decimal strings; a side left out
+    // has no ceiling, exactly as on `submit`.
     const block = isRecord(own(body, "vorq")) ? (own(body, "vorq") as Record<string, unknown>) : {};
     // **D19 — a `vorq.sla` that is present and not a string is refused, not
     // defaulted.** Falling back to `"1h"` here would silently rewrite a *signed*
@@ -667,10 +667,10 @@ export function sealingFetch(options: SealingFetchOptions = {}): SealingFetch {
         model,
         input: payload,
         sla,
-        // `rate_in`/`rate_out` are **signed, settled terms**: a prototype-supplied
-        // bid is a bid this SDK would sign on the caller's behalf.
-        rateIn: (own(block, "rate_in") ?? null) as SubmitArgs["rateIn"],
-        rateOut: (own(block, "rate_out") ?? null) as SubmitArgs["rateOut"],
+        // The ceilings bound **signed, settled terms**: a prototype-supplied one
+        // is a price this SDK would sign up to on the caller's behalf.
+        maxRateIn: (own(block, "max_rate_in") ?? null) as SubmitArgs["maxRateIn"],
+        maxRateOut: (own(block, "max_rate_out") ?? null) as SubmitArgs["maxRateOut"],
         ...(typeof rawProvider === "number" ? { provider: rawProvider } : {}),
       });
       if (background) {

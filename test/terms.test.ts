@@ -14,6 +14,7 @@ import {
   SESSION_TYPES,
   capFor,
   orderDomain,
+  parseCeiling,
   parseRate,
   paymentDomain,
   registryDomain,
@@ -275,7 +276,10 @@ describe("OrderTerms", () => {
     expect(parseRate("0.05", "rate_in", 6)).toBe(50_000n);
     expect(parseRate("0.000001", "rate_in", 6)).toBe(1n);
     expect(parseRate("12", "rate_in", 6)).toBe(12_000_000n);
-    expect(parseRate(null, "rate_in", 6)).toBe(0n);
+    // An order signs both rates: none is a refusal here, and `null` only as a ceiling.
+    expect(() => parseRate(null, "rate_in", 6)).toThrow(ValidationError);
+    expect(parseCeiling(null, "max_rate_in", 6)).toBeNull();
+    expect(parseCeiling("0.05", "max_rate_in", 6)).toBe(50_000n);
     // Finer than the token carries is refused, never rounded to zero — an order
     // no provider will ever claim, learned from the expiry.
     expect(() => parseRate("0.0000001", "rate_in", 6)).toThrow(ValidationError);

@@ -49,7 +49,8 @@ import {
   type MediaResult,
   type TextResult,
 } from "./results.js";
-import { isUsd, parseUsd } from "./money.js";
+import { formatUsd, isUsd, parseUsd } from "./money.js";
+import { parseCeiling } from "./terms.js";
 import { asBigInt } from "./scalars.js";
 import { declareUnits } from "./units.js";
 import { normalizeSla, pollInterval, slaSeconds } from "./sla.js";
@@ -184,7 +185,7 @@ const providerFor = (providers: number[], index: number): number | undefined =>
  * A fresh object every time rather than a `delete` over the caller's own body:
  * `submit` is handed the caller's array and must give it back unchanged.
  */
-const ROUTING_KEYS = new Set(["model", "rate_in", "rate_out", "units_out"]);
+const ROUTING_KEYS = new Set(["model", "max_rate_in", "max_rate_out", "units_out"]);
 const inputOf = (body: Record<string, unknown>): Record<string, unknown> =>
   Object.fromEntries(Object.entries(body).filter(([k]) => !ROUTING_KEYS.has(k)));
 
@@ -215,12 +216,18 @@ export class Batches {
    * url, body: {model, …}}`) or a JSONL string holding them. Every line is
    * sealed to its recipient inside this process; nothing leaves it in the clear.
    *
-   * `providers` is how a batch spreads. Given a list, lines are designated
+   * A line's `max_rate_in` / `max_rate_out` are the most it pays, each optional.
+   * Before anything is sealed the coordinator plans who takes each line within
+   * its ceilings and at which ask; a planned line signs that ask and is pinned
+   * to its provider. A line the plan cannot place **rests** at its ceilings, a
+   * side with no ceiling at the market rate.
+   *
+   * `providers` is how the resting lines spread. Given a list, they are designated
    * round-robin across it — one batch running across several operators, each
-   * able to open only its own lines. Given an **empty** list, every line is an
+   * able to open only its own lines. Given an **empty** list, each is an
    * open order: sealed to the coordinator's verified escrow key and claimable
    * by any provider that clears the terms, which spreads further than a fixed
-   * list can and needs no candidate ranking. That path requires a client built
+   * list can. That path requires a client built
    * with `verifier`, exactly as a single open `submit` does — an escrow key
    * that cannot be checked is not one this SDK will seal to.
    *
@@ -284,30 +291,6 @@ export class Batches {
         type: "invalid_request_error",
       });
     }
-    const priced = (line: Record<string, unknown>): boolean => {
-      const body = own(line, "body");
-      if (typeof body !== "object" || body === null) return true;
-      const rate = (key: string) => own(body as Record<string, unknown>, key);
-      return (rate("rate_in") ?? null) !== null || (rate("rate_out") ?? null) !== null;
-    };
-    // Only priced lines can be open orders: an unpriced one is planned and pinned.
-    const anyOpen = providers.length === 0 && lines.some((line) => priced(line));
-    if (anyOpen && this.client.verifier === null) {
-      // An empty list is a batch of open orders, each sealed to the
-      // coordinator's escrow key. A client built with a verifier can check that
-      // key and rests them; one built without cannot, and fails closed here —
-      // before a byte is sealed, which is the whole point of checking it at this
-      // door rather than at the first line's `sealLine`. Same policy as a single
-      // open `submit`, reaching a second door.
-      throw new EscrowKeyUnverified(
-        "a batch with no providers is a batch of open orders, which are sealed to " +
-          "the coordinator's escrow key — and this client has no verifier to check " +
-          "that key with. Build the client with `verifier`, or name the providers to " +
-          "designate: batches.submit(lines, window, { providers: [id, …] })",
-        { type: "invalid_request_error" },
-      );
-    }
-
     // -- everything checkable locally, before a single byte is sealed --------
     //
     // Sealing is the expensive half and it is per line; a file with a typo on
@@ -331,9 +314,9 @@ export class Batches {
         );
       }
       // Own properties only on `line` and on `line.body` throughout this method
-      // (`own.ts`). Both are the caller's records; `rate_in`/`rate_out` on a
-      // body are **signed, settled terms**, so a prototype-supplied bid is one
-      // this SDK would sign on the caller's behalf.
+      // (`own.ts`). Both are the caller's records; `max_rate_in`/`max_rate_out`
+      // on a body bound **signed, settled terms**, so a prototype-supplied
+      // ceiling is a price this SDK would sign up to on the caller's behalf.
       const customId = own(line, "custom_id");
       if (customId !== undefined && customId !== null) {
         if (
@@ -411,11 +394,30 @@ export class Batches {
       }
     }
 
-    // -- the plan: who takes each unpriced line, at which ask ---------------
-    const picks = await this.plan(lines, window, priced);
+    // -- the plan: who takes each line, at which rates -----------------------
+    const ctx = await this.client.chainContext();
+    const picks = await this.plan(lines, window, ctx.decimals);
+    if (
+      providers.length === 0 &&
+      this.client.verifier === null &&
+      picks.some((pick) => pick.provider === undefined)
+    ) {
+      // A line the plan could not place rests, and with no providers to
+      // designate it rests as an open order, sealed to the coordinator's escrow
+      // key. A client built with a verifier can check that key; one built
+      // without cannot, and fails closed here — before a byte is sealed, which
+      // is the whole point of checking it at this door rather than at the first
+      // line's `sealLine`. Same policy as a single open `submit`.
+      throw new EscrowKeyUnverified(
+        "no provider is within the ceilings of every line, so some would rest as open " +
+          "orders, which are sealed to the coordinator's escrow key — and this client has " +
+          "no verifier to check that key with. Build the client with `verifier`, or name " +
+          "the providers to designate: batches.submit(lines, window, { providers: [id, …] })",
+        { type: "invalid_request_error" },
+      );
+    }
 
     // -- seal every line ----------------------------------------------------
-    const ctx = await this.client.chainContext();
     const sealed: SealedLine[] = [];
     for (const [i, line] of lines.entries()) {
       // Read the routing keys off the body rather than removing them from it:
@@ -423,11 +425,11 @@ export class Batches {
       // the body belongs to the caller.
       // **`body` here is masked by the pre-flight loop's own read of the same
       // key**, which refused every line whose body was not an own object with a
-      // model. `units_out`, `rate_in`, `rate_out` and `custom_id` below are
-      // **not** masked by anything: they are read here and nowhere else.
+      // model. `units_out` and `custom_id` below are **not** masked by
+      // anything: they are read here and nowhere else.
       const body = own(line, "body") as Record<string, unknown>;
       const unitsOut = own(body, "units_out");
-      const pick = picks.get(i);
+      const pick = picks[i]!;
       sealed.push(
         await this.client.sealLine({
           // Masked by the same pre-flight refusal as the `body` read above.
@@ -435,9 +437,10 @@ export class Batches {
           payloadInput: inputOf(body),
           window,
           url: endpoint,
-          rateIn: pick?.rateIn ?? (own(body, "rate_in") as SealLineArgs["rateIn"]),
-          rateOut: pick?.rateOut ?? (own(body, "rate_out") as SealLineArgs["rateOut"]),
-          provider: pick?.provider ?? providerFor(providers, i),
+          rateIn: pick.rateIn,
+          rateOut: pick.rateOut,
+          // Not planned: the line rests, spread across `providers`.
+          provider: pick.provider ?? providerFor(providers, i),
           // **Handed over as it is, never `Number(...)`.** `declareUnits`
           // refuses a `units_out` that is not an integer *by type*, exactly as
           // the authority does, and coercing here would defeat that: `true`
@@ -514,112 +517,202 @@ export class Batches {
    * from here, which is what keeps a node from naming what a signature approves.
    */
   /**
-   * Provider and ask for every line that names no bid, from the coordinator's
-   * plan.
+   * Provider and rates for every line, from the coordinator's plan.
    *
-   * One `POST /v1/batches` with no file: per model, the line count and the
-   * summed units. The node answers which providers take how many lines, never
-   * past a provider's on-chain capacity. A model the network cannot take in full
-   * in this window refuses the whole batch before anything is signed.
+   * One `POST /v1/batches` with no file: per model and pair of ceilings, the
+   * line count and the summed units. The node answers which providers within
+   * the ceilings take how many lines, never past a provider's on-chain capacity,
+   * and a placed line signs its provider's ask. A line left over rests, with no
+   * provider, at its ceilings; a side with no ceiling rests at the market rate,
+   * read by one more plan that names none. A line with no ceiling at all cannot
+   * rest, so a batch that leaves one over is refused before anything is signed.
    */
   private async plan(
     lines: Record<string, unknown>[],
     window: string,
-    priced: (line: Record<string, unknown>) => boolean,
-  ): Promise<Map<number, { provider: number; rateIn: string; rateOut: string }>> {
-    const unpriced = new Map<string, number[]>();
-    const units = new Map<string, { in: number; out: number }>();
+    decimals: number,
+  ): Promise<{ provider: number | undefined; rateIn: string; rateOut: string }[]> {
+    interface Group {
+      model: string;
+      maxIn: bigint | null;
+      maxOut: bigint | null;
+      indexes: number[];
+      unitsIn: number;
+      unitsOut: number;
+    }
+    interface Share {
+      provider: number;
+      rateIn: bigint;
+      rateOut: bigint;
+      lines: bigint;
+    }
+    const groups = new Map<string, Group>();
     for (const [i, line] of lines.entries()) {
-      if (priced(line)) continue;
       const body = own(line, "body") as Record<string, unknown>;
       const model = String(own(body, "model"));
-      unpriced.set(model, [...(unpriced.get(model) ?? []), i]);
+      const maxIn = parseCeiling(own(body, "max_rate_in"), `line ${i + 1}: max_rate_in`, decimals);
+      const maxOut = parseCeiling(own(body, "max_rate_out"), `line ${i + 1}: max_rate_out`, decimals);
+      const key = JSON.stringify([model, maxIn?.toString() ?? null, maxOut?.toString() ?? null]);
+      const group = groups.get(key) ?? { model, maxIn, maxOut, indexes: [], unitsIn: 0, unitsOut: 0 };
       const unitsOut = own(body, "units_out");
       const declared = declareUnits(
         inputOf(body),
         unitsOut === undefined || unitsOut === null ? undefined : (unitsOut as number),
       );
-      const total = units.get(model) ?? { in: 0, out: 0 };
-      units.set(model, { in: total.in + declared.unitsIn, out: total.out + declared.unitsOut });
+      group.indexes.push(i);
+      group.unitsIn += declared.unitsIn;
+      group.unitsOut += declared.unitsOut;
+      groups.set(key, group);
     }
-    const picks = new Map<number, { provider: number; rateIn: string; rateOut: string }>();
-    if (unpriced.size === 0) return picks;
 
-    const models = [...unpriced.keys()];
-    const request = {
-      completion_window: window,
-      models: await Promise.all(
-        models.map(async (m) => ({
-          model_id: await this.client.modelIdFor(m),
-          lines: unpriced.get(m)!.length,
-          units_in: units.get(m)!.in,
-          units_out: units.get(m)!.out,
-        })),
-      ),
-    };
-    const response = await this.client.request("POST", "/v1/batches", {
-      json: request,
-      retry: false,
-      allowStatuses: [402],
-    });
-    let body: unknown = {};
-    try {
-      body = await response.json();
-    } catch {
-      // An unreadable body carries no plan, and is refused below as one.
-    }
-    const plan =
-      response.status === 402 && typeof body === "object" && body !== null
-        ? own(body as Record<string, unknown>, "plan")
-        : undefined;
-    if (!Array.isArray(plan) || plan.length !== models.length) {
-      throw new VorqError(
-        `POST /v1/batches answered ${response.status} to a plan without one plan entry per model`,
-        { type: "api_error", statusCode: response.status },
-      );
-    }
-    for (const [k, model] of models.entries()) {
-      const entry = plan[k] as unknown;
-      const allocation =
-        typeof entry === "object" && entry !== null
-          ? own(entry as Record<string, unknown>, "allocation")
-          : undefined;
-      if (!Array.isArray(allocation)) {
-        throw new VorqError("a plan entry carries no allocation list", {
-          type: "api_error",
-          statusCode: 402,
-        });
+    /** Per entry, the shares the node plans; `ceilings: false` asks for the market instead. */
+    const allocations = async (
+      entries: { group: Group; lines: number }[],
+      ceilings = true,
+    ): Promise<Share[][]> => {
+      const request = {
+        completion_window: window,
+        models: await Promise.all(
+          entries.map(async ({ group, lines: count }) => ({
+            model_id: await this.client.modelIdFor(group.model),
+            lines: count,
+            units_in: group.unitsIn,
+            units_out: group.unitsOut,
+            ...(ceilings && group.maxIn !== null
+              ? { max_rate_in: formatUsd(group.maxIn, decimals) }
+              : {}),
+            ...(ceilings && group.maxOut !== null
+              ? { max_rate_out: formatUsd(group.maxOut, decimals) }
+              : {}),
+          })),
+        ),
+      };
+      const response = await this.client.request("POST", "/v1/batches", {
+        json: request,
+        retry: false,
+        allowStatuses: [402],
+      });
+      let body: unknown = {};
+      try {
+        body = await response.json();
+      } catch {
+        // An unreadable body carries no plan, and is refused below as one.
       }
-      const queue = unpriced.get(model)!;
-      let placed = 0;
-      for (const share of allocation as unknown[]) {
-        const record = (typeof share === "object" && share !== null ? share : {}) as Record<
-          string,
-          unknown
-        >;
-        const pid = asBigInt(own(record, "provider_id"));
-        const count = asBigInt(own(record, "lines"));
-        const rateIn = own(record, "rate_in");
-        const rateOut = own(record, "rate_out");
-        if (pid === null || pid <= 0n || count === null || !isUsd(rateIn) || !isUsd(rateOut)) {
-          throw new VorqError("a plan allocation names no provider, line count or ask", {
+      const plan =
+        response.status === 402 && typeof body === "object" && body !== null
+          ? own(body as Record<string, unknown>, "plan")
+          : undefined;
+      if (!Array.isArray(plan) || plan.length !== entries.length) {
+        throw new VorqError(
+          `POST /v1/batches answered ${response.status} to a plan without one plan entry per entry asked`,
+          { type: "api_error", statusCode: response.status },
+        );
+      }
+      return (plan as unknown[]).map((entry) => {
+        const allocation =
+          typeof entry === "object" && entry !== null
+            ? own(entry as Record<string, unknown>, "allocation")
+            : undefined;
+        if (!Array.isArray(allocation)) {
+          throw new VorqError("a plan entry carries no allocation list", {
             type: "api_error",
             statusCode: 402,
           });
         }
-        for (let n = 0n; n < count && placed < queue.length; n += 1n) {
-          picks.set(queue[placed]!, { provider: Number(pid), rateIn, rateOut });
+        return (allocation as unknown[]).map((share) => {
+          const record = (typeof share === "object" && share !== null ? share : {}) as Record<
+            string,
+            unknown
+          >;
+          const pid = asBigInt(own(record, "provider_id"));
+          const count = asBigInt(own(record, "lines"));
+          const rateIn = own(record, "rate_in");
+          const rateOut = own(record, "rate_out");
+          if (pid === null || pid <= 0n || count === null || !isUsd(rateIn) || !isUsd(rateOut)) {
+            throw new VorqError("a plan allocation names no provider, line count or ask", {
+              type: "api_error",
+              statusCode: 402,
+            });
+          }
+          try {
+            return {
+              provider: Number(pid),
+              rateIn: parseUsd(rateIn, decimals),
+              rateOut: parseUsd(rateOut, decimals),
+              lines: count,
+            };
+          } catch (error) {
+            throw new VorqError(`a plan allocation is unreadable: ${(error as Error).message}`, {
+              type: "api_error",
+              statusCode: 402,
+            });
+          }
+        });
+      });
+    };
+
+    const all = [...groups.values()];
+    const picks: { provider: number | undefined; rateIn: string; rateOut: string }[] = [];
+    const left = new Map<Group, number[]>();
+    const planned = await allocations(all.map((group) => ({ group, lines: group.indexes.length })));
+    for (const [k, group] of all.entries()) {
+      let placed = 0;
+      for (const share of planned[k]!) {
+        if (
+          (group.maxIn !== null && share.rateIn > group.maxIn) ||
+          (group.maxOut !== null && share.rateOut > group.maxOut)
+        ) {
+          throw new VorqError(
+            `the node planned provider ${share.provider} at an ask above the ceilings the plan set`,
+            { type: "api_error", statusCode: 402 },
+          );
+        }
+        for (let n = 0n; n < share.lines && placed < group.indexes.length; n += 1n) {
+          picks[group.indexes[placed]!] = {
+            provider: share.provider,
+            rateIn: formatUsd(share.rateIn, decimals),
+            rateOut: formatUsd(share.rateOut, decimals),
+          };
           placed += 1;
         }
       }
-      if (placed < queue.length) {
-        throw new ValidationError(
-          `the network can take ${placed} of the ${queue.length} unpriced ${model} lines in ` +
-            `the ${window} window right now, so nothing was signed. Split the file, try the ` +
-            "other window, or name rate_in and rate_out on the lines",
-          { type: "invalid_request_error" },
-        );
+      if (placed < group.indexes.length) left.set(group, group.indexes.slice(placed));
+    }
+
+    const refuse = (group: Group): ValidationError =>
+      new ValidationError(
+        `the network can take ${group.indexes.length - left.get(group)!.length} of the ` +
+          `${group.indexes.length} ${group.model} lines without both ceilings in the ${window} ` +
+          "window right now, so nothing was signed. Split the file, try the other window, or " +
+          "name max_rate_in and max_rate_out on the lines",
+        { type: "invalid_request_error" },
+      );
+
+    // -- the lines that rest: at their ceilings, the market rate where there is none
+    for (const group of left.keys()) {
+      if (group.maxIn === null && group.maxOut === null) throw refuse(group);
+    }
+    const unnamed = [...left.keys()].filter((g) => g.maxIn === null || g.maxOut === null);
+    const market = new Map<Group, Share>();
+    if (unnamed.length > 0) {
+      const asks = await allocations(
+        unnamed.map((group) => ({ group, lines: left.get(group)!.length })),
+        false,
+      );
+      for (const [k, group] of unnamed.entries()) {
+        const first = asks[k]![0];
+        if (first === undefined) throw refuse(group);
+        market.set(group, first);
       }
+    }
+    for (const [group, indexes] of left) {
+      const ask = market.get(group);
+      const rest = {
+        provider: undefined,
+        rateIn: formatUsd(group.maxIn ?? ask!.rateIn, decimals),
+        rateOut: formatUsd(group.maxOut ?? ask!.rateOut, decimals),
+      };
+      for (const i of indexes) picks[i] = rest;
     }
     return picks;
   }

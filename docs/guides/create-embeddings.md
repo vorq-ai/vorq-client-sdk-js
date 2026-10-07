@@ -13,7 +13,7 @@ const handle = await client.submit({
   model: embeddingModel,
   input: { input: ["first passage", "second passage"], encoding_format: "base64" },
   sla: "async",
-  rateIn,
+  maxRateIn,
   unitsOut: 0,        // an embedding has no output side to pay for
   provider,
 });
@@ -21,7 +21,7 @@ const handle = await client.submit({
 
 `unitsOut: 0` matters. Without it, a request that names no output-token ceiling is priced as a
 text job with a default ceiling of 4096 output units, and your payment authorization covers that
-at `rateOut`. See [Units](../reference/submit.md#units).
+at the order's output rate. See [Units](../reference/submit.md#units).
 
 ## Read the vectors
 

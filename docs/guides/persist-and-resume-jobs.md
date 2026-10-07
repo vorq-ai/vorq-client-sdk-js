@@ -11,7 +11,7 @@ reload, a crash, a deploy) and the job carries on. What you must not lose is the
 ```ts
 import { WaitTimeout } from "@vorq-ai/client-sdk";
 
-const handle = await client.submit({ model, input, sla: "batch", rateIn, rateOut, provider });
+const handle = await client.submit({ model, input, sla: "batch", maxRateIn, maxRateOut, provider });
 await store.put(handle.id, { status: "submitted" });       // BEFORE waiting on anything
 
 try {
@@ -53,7 +53,7 @@ resumed worker) is a no-op rather than a duplicate.
 
 ```ts
 const handles = await Promise.all(
-  prompts.map((p) => client.submit({ model, input: p, sla: "async", rateIn, rateOut, provider })),
+  prompts.map((p) => client.submit({ model, input: p, sla: "async", maxRateIn, maxRateOut, provider })),
 );
 await Promise.all(handles.map((h) => store.put(h.id, { status: "submitted" })));
 const results = await Promise.all(handles.map((h) => h.result()));

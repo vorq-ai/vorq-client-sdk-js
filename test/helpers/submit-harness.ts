@@ -166,16 +166,26 @@ export const isMarketProbe = (body: unknown): boolean =>
   !("rate_in" in body) &&
   !("rate_out" in body);
 
+/** Whether a candidate's ask is at or under the ceilings a probe names. */
+export const withinCeilings = (candidate: unknown, probe: unknown): boolean =>
+  (["rate_in", "rate_out"] as const).every((side) => {
+    const ceiling = (probe as Record<string, unknown>)[`max_${side}`];
+    const ask = (candidate as Record<string, unknown>)[side];
+    return typeof ceiling !== "string" || typeof ask !== "string" || parseUsd(ask, 6) <= parseUsd(ceiling, 6);
+  });
+
 /**
- * The node's answer to a market probe: the pinned provider, or provider 1.
- * Any other `POST /v1/jobs` passes on to the test's own route.
+ * The node's answer to a market probe: the pinned provider, or provider 1,
+ * less any whose ask is above a ceiling the probe names. Any other
+ * `POST /v1/jobs` passes on to the test's own route.
  */
 export const marketRoute = (candidates?: unknown[]): Route => [
   /\/v1\/jobs$/,
   (_n, body) => {
     if (!isMarketProbe(body)) return null;
     const pinned = Number((body as { designated?: unknown }).designated ?? 0);
-    return json({ candidates: candidates ?? [marketCandidate(pinned || 1)] }, 402);
+    const named = candidates ?? [marketCandidate(pinned || 1)];
+    return json({ candidates: named.filter((c) => withinCeilings(c, body)) }, 402);
   },
 ];
 
@@ -330,10 +340,12 @@ export interface BatchHarnessOptions {
   /** The batch object `POST /v1/batches` answers with. */
   batch?: Record<string, unknown>;
   /**
-   * What a plan (`POST /v1/batches` with no file) allots per model. Unset:
-   * provider 1 takes every line at "0.001"/"0.002".
+   * What a plan (`POST /v1/batches` with no file) allots per entry: a list, or
+   * a function of the entry. Unset: provider 1 takes every line of an entry
+   * that names no ceiling at "0.001"/"0.002", and nobody is within an entry
+   * that names one, so those lines rest at their own terms.
    */
-  allocation?: Record<string, unknown>[];
+  allocation?: unknown[] | ((entry: Record<string, unknown>) => unknown[]);
   /**
    * The status `POST /v1/batches` answers. Default `200`.
    *
@@ -426,15 +438,19 @@ export function batchHarness(options: BatchHarnessOptions = {}) {
         const ask = body as Record<string, unknown>;
         if (!("input_file_id" in ask)) {
           plans.push(ask);
-          const models = ask.models as { model_id: number; lines: number }[];
+          const models = ask.models as (Record<string, unknown> & { model_id: number; lines: number })[];
           return json(
             {
               plan: models.map((m) => ({
                 model_id: m.model_id,
                 lines: m.lines,
-                allocation: options.allocation ?? [
-                  { ...marketCandidate(1), lines: m.lines },
-                ],
+                allocation:
+                  typeof options.allocation === "function"
+                    ? options.allocation(m)
+                    : (options.allocation ??
+                      (Object.hasOwn(m, "max_rate_in") || Object.hasOwn(m, "max_rate_out")
+                        ? []
+                        : [{ ...marketCandidate(1), lines: m.lines }])),
               })),
             },
             402,

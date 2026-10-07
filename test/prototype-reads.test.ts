@@ -155,7 +155,7 @@ import { parseUsd } from "../src/money.js";
 import { declareUnits } from "../src/units.js";
 
 /** A batch line body with its own bid: an unpriced line is refused. */
-const PRICED_LINE = { model: "m", rate_in: "1", rate_out: "2" };
+const PRICED_LINE = { model: "m", max_rate_in: "1", max_rate_out: "2" };
 import { Verifier } from "../src/verify.js";
 import {
   CHAIN,
@@ -172,6 +172,8 @@ import {
   manifestRows,
   marketRoute,
   posts,
+  probes,
+  type Call,
   scriptedFetch,
   type Route,
   usd,
@@ -1639,13 +1641,13 @@ describe("openai-compat — the create body and its vorq block", () => {
   // Site: `own(body, "vorq")` in `create`.
   it("reads no vorq block from the create body's prototype", async () => {
     const h = capturing();
-    await pollutedAsync("vorq", { provider: 7, sla: "720h", rate_in: "999" }, () =>
+    await pollutedAsync("vorq", { provider: 7, sla: "720h", max_rate_in: "999" }, () =>
       post(h.fetch, { model: "m", input: "hi" }),
     );
     const args = h.submitted[0]!;
     expect(Object.hasOwn(args, "provider")).toBe(false);
     expect(args.sla).toBe("1h");
-    expect(args.rateIn).toBeNull();
+    expect(args.maxRateIn).toBeNull();
   });
 
   // Site: `own(block, "provider")` in `create` (D20).
@@ -1669,20 +1671,20 @@ describe("openai-compat — the create body and its vorq block", () => {
     expect(h.submitted[0]!.sla).toBe("1h");
   });
 
-  // Site: `own(block, "rate_in")` in `create`.
-  it("reads no input rate from the prototype", async () => {
+  // Site: `own(block, "max_rate_in")` in `create`.
+  it("reads no input ceiling from the prototype", async () => {
     const h = capturing();
-    await pollutedAsync("rate_in", "999", () => post(h.fetch, { model: "m", input: "hi", vorq: {} }));
-    expect(h.submitted[0]!.rateIn).toBeNull();
+    await pollutedAsync("max_rate_in", "999", () => post(h.fetch, { model: "m", input: "hi", vorq: {} }));
+    expect(h.submitted[0]!.maxRateIn).toBeNull();
   });
 
-  // Site: `own(block, "rate_out")` in `create`.
-  it("reads no output rate from the prototype", async () => {
+  // Site: `own(block, "max_rate_out")` in `create`.
+  it("reads no output ceiling from the prototype", async () => {
     const h = capturing();
-    await pollutedAsync("rate_out", "999", () =>
+    await pollutedAsync("max_rate_out", "999", () =>
       post(h.fetch, { model: "m", input: "hi", vorq: {} }),
     );
-    expect(h.submitted[0]!.rateOut).toBeNull();
+    expect(h.submitted[0]!.maxRateOut).toBeNull();
   });
 
   // Site: `own(payload, "input")` in `create`.
@@ -1880,29 +1882,34 @@ describe("batches — the lines and options a submit is built from", () => {
     expect(h.calls).toHaveLength(0);
   });
 
-  // Site: `own(body, "rate_in")` in the sealing loop.
-  it("signs no input rate from a body's prototype", async () => {
+  // Site: `own(body, "max_rate_in")` in the plan.
+  it("plans under no input ceiling from a body's prototype", async () => {
     const h = batchHarness({ gasFee: 7n });
     const sealLine = vi.spyOn(h.client, "sealLine");
-    // The line names its output rate only, so it is priced by its own members.
-    await pollutedAsync("rate_in", "999", async () => {
-      await h.client.batches.submit([{ body: { model: "m", rate_out: "2" } }], "1h", {
+    // The line names its output ceiling only, so the input side has none: it
+    // rests at the market's input rate, never the inherited 999.
+    await pollutedAsync("max_rate_in", "999", async () => {
+      await h.client.batches.submit([{ body: { model: "m", max_rate_out: "0.0001" } }], "1h", {
         providers: [1],
       });
     });
-    expect(sealLine.mock.calls[0]![0].rateIn).toBeUndefined();
+    const [entry] = h.plans[0]!.models as Record<string, unknown>[];
+    expect(Object.hasOwn(entry!, "max_rate_in")).toBe(false);
+    expect(sealLine.mock.calls[0]![0].rateIn).toBe("0.001");
   });
 
-  // Site: `own(body, "rate_out")` in the sealing loop.
-  it("signs no output rate from a body's prototype", async () => {
+  // Site: `own(body, "max_rate_out")` in the plan.
+  it("plans under no output ceiling from a body's prototype", async () => {
     const h = batchHarness({ gasFee: 7n });
     const sealLine = vi.spyOn(h.client, "sealLine");
-    await pollutedAsync("rate_out", "999", async () => {
-      await h.client.batches.submit([{ body: { model: "m", rate_in: "1" } }], "1h", {
+    await pollutedAsync("max_rate_out", "999", async () => {
+      await h.client.batches.submit([{ body: { model: "m", max_rate_in: "0.0001" } }], "1h", {
         providers: [1],
       });
     });
-    expect(sealLine.mock.calls[0]![0].rateOut).toBeUndefined();
+    const [entry] = h.plans[0]!.models as Record<string, unknown>[];
+    expect(Object.hasOwn(entry!, "max_rate_out")).toBe(false);
+    expect(sealLine.mock.calls[0]![0].rateOut).toBe("0.002");
   });
 
   // Site: `own(body, "units_out")` in the sealing loop.
@@ -1922,15 +1929,16 @@ describe("batches — the lines and options a submit is built from", () => {
     // **The batch path's version of the create finding.** An inherited
     // `providers` seals every line to an operator the caller never named,
     // instead of to the coordinator's verified escrow key. With the own-read,
-    // the list is empty — an open batch — and this client has no verifier, so
-    // it fails closed before a byte is sealed.
+    // the list is empty — the line rests open — and this client has no
+    // verifier, so it fails closed before a byte is sealed.
     const h = batchHarness({ gasFee: 7n });
     await pollutedAsync("providers", [1], async () => {
       await expect(
         h.client.batches.submit([{ body: PRICED_LINE }], "1h", {} as { providers: number[] }),
       ).rejects.toThrow(EscrowKeyUnverified);
     });
-    expect(h.calls).toHaveLength(0);
+    expect(h.termsOnlyPosts).toHaveLength(0);
+    expect(h.uploads).toHaveLength(0);
   });
 
   // Site: `own(opts, "validateParams")` in `submit`.
@@ -2003,7 +2011,12 @@ describe("client — the provider record a payload is sealed to", () => {
   // The same site, reached the way the finding was measured: through a real
   // batch submit, which is a **non-confidential designated** order.
   it("refuses a batch line whose provider publishes no box_key, under pollution", async () => {
-    const { client: c, calls } = client([silentProvider, ...baseRoutes()]);
+    // The plan places nobody, so the line rests on the provider it names.
+    const { client: c, calls } = client([
+      silentProvider,
+      ...baseRoutes(),
+      [/\/v1\/batches$/, () => json({ plan: [{ allocation: [] }] }, 402)],
+    ]);
     await pollutedAsync("box_key", ATTACKER_KEY, async () => {
       await expect(
         c.batches.submit([{ body: PRICED_LINE }], "1h", { providers: [1] }),
@@ -2363,15 +2376,17 @@ describe("client — the arguments a sealed order is built from", () => {
     await pollutedAllAsync(
       [
         ["provider", 9],
-        ["rateIn", "999"],
-        ["rateOut", "999"],
+        ["maxRateIn", "999"],
+        ["maxRateOut", "999"],
         ["sla", "720h"],
       ],
       async () => {
-        await expect(c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" })).rejects.toThrow(EscrowKeyUnverified);
+        await expect(c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" })).rejects.toThrow(EscrowKeyUnverified);
       },
     );
-    expect(calls.filter((call) => call.url.endsWith("/v1/jobs"))).toHaveLength(0);
+    // Only the unsigned market probe went out, unpinned and under the own ceilings.
+    expect(posts(calls)).toHaveLength(0);
+    expect(probes(calls)[0]!.body).toMatchObject({ designated: 0, max_rate_in: "0.0001" });
   });
 
   // Site: `arg(key)` in `Client.sealLine`.
@@ -2391,6 +2406,8 @@ describe("client — the arguments a sealed order is built from", () => {
             payloadInput: { input: "hi" },
             window: "1h",
             url: "/v1/responses",
+            rateIn: "0",
+            rateOut: "0",
             ctx,
           }),
         ).rejects.toThrow(EscrowKeyUnverified);
@@ -3028,9 +3045,20 @@ describe("batches — the gas fee the whole file's payments are signed over", ()
       ...baseRoutes(),
       [/\/v1\/jobs$/, () => json(body, 402)],
       [/\/v1\/files$/, () => json({ id: "f", object: "file", purpose: "batch", bytes: 1 })],
-      [/\/v1\/batches$/, () => json({ id: "b", object: "batch", status: "validating" })],
+      [
+        /\/v1\/batches$/,
+        // The plan places nobody, so the line rests at its own terms.
+        (_n, body) =>
+          Object.hasOwn(body as object, "input_file_id")
+            ? json({ id: "b", object: "batch", status: "validating" })
+            : json({ plan: [{ allocation: [] }] }, 402),
+      ],
     ]);
   const line = [{ body: PRICED_LINE }];
+  const created = (calls: Call[]) =>
+    calls.filter(
+      (c) => c.url.endsWith("/v1/batches") && Object.hasOwn(c.body as object, "input_file_id"),
+    );
 
   // Site: `own(body, "quote")` in `Batches.fees`.
   //
@@ -3047,7 +3075,7 @@ describe("batches — the gas fee the whole file's payments are signed over", ()
     });
     // The consequence: nothing was uploaded and nothing was authorized.
     expect(h.calls.filter((c) => c.url.endsWith("/v1/files"))).toHaveLength(0);
-    expect(h.calls.filter((c) => c.url.endsWith("/v1/batches"))).toHaveLength(0);
+    expect(created(h.calls)).toHaveLength(0);
   });
 
   // Site: `own(quote, "gas_fee")` in `Batches.fees`.
@@ -3918,6 +3946,8 @@ describe("client — the sealed line payLine authorizes", () => {
       payloadInput: { input: "hi" },
       window: "1h",
       url: "/v1/responses",
+      rateIn: "0",
+      rateOut: "0",
       provider: 1,
       ctx,
     });
@@ -3935,6 +3965,8 @@ describe("client — the sealed line payLine authorizes", () => {
       payloadInput: { input: "hi" },
       window: "1h",
       url: "/v1/responses",
+      rateIn: "0",
+      rateOut: "0",
       provider: 1,
       ctx,
     });

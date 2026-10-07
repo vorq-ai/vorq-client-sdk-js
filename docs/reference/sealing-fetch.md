@@ -20,7 +20,7 @@ else before reading its body. A how-to is in
 | --- | --- | --- |
 | `baseUrl` | `string` | The **bare** coordinator origin, without `/v1`. |
 | `signer`, `cipher` | `Signer`, `Cipher` | As on [`Client`](./client.md#constructor). |
-| `verifier` | `Verifier \| null` | Required for open orders: a request that names a bid and no `vorq.provider`. |
+| `verifier` | `Verifier \| null` | Required for open orders: a request no provider is within the ceilings of, with no `vorq.provider`. |
 | `timeoutMs` | `number` | Per-request HTTP timeout. |
 | `fetch` | `typeof fetch` | The underlying transport. |
 | `client` | `Client` | An existing client, **instead of** all options above. Passing both throws `Error`. |
@@ -36,8 +36,8 @@ The body becomes a sealed job:
 
 - `model` is the model; `background`, `vorq` and `metadata` are taken out; the rest of the body
   is the model input. An array `input` is passed to the model as `messages`.
-- `vorq.sla` (default `"1h"`), `vorq.rate_in`, `vorq.rate_out` and `vorq.provider` become the
-  order terms, as on [`submit`](./submit.md): with neither rate, the order takes the market.
+- `vorq.sla` (default `"1h"`), `vorq.max_rate_in`, `vorq.max_rate_out` and `vorq.provider`
+  become the order terms, as `maxRateIn` / `maxRateOut` on [`submit`](./submit.md).
   Other `vorq` keys are ignored.
 - With `background: true`, answers at once with a `queued` Response. Without it, waits for the
   job, bounded by its window, and answers with the settled Response. A job that fails while

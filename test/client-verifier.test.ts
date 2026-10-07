@@ -49,6 +49,7 @@ import {
   json,
   openEnvelope,
   posts,
+  probes,
 } from "./helpers/submit-harness.js";
 
 /**
@@ -147,7 +148,7 @@ describe("Client without a verifier — unchanged", () => {
     const captured: Captured = {};
     const { client: c, calls } = client([...baseRoutes(), jobsRoute(captured)]);
 
-    await expect(c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" })).rejects.toBeInstanceOf(
+    await expect(c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" })).rejects.toBeInstanceOf(
       EscrowKeyUnverified,
     );
     expect(posts(calls)).toHaveLength(0);
@@ -268,6 +269,8 @@ describe("Client with a verifier — the confidential designated path", () => {
         payloadInput: { input: "hi" },
         window: "24h",
         url: "/v1/responses",
+        rateIn: "0",
+        rateOut: "0",
         provider: 7,
         confidential: true,
         ctx,
@@ -321,7 +324,7 @@ describe("Client with a verifier — the open path", () => {
       { verifier: verifier({ entries: () => ESCROW_ACTIVE }) },
     );
 
-    const handle = await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" });
+    const handle = await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" });
 
     expect(handle.id).toMatch(/^0x[0-9a-f]{64}$/);
     expect(keyReads(calls)).toHaveLength(1);
@@ -343,7 +346,7 @@ describe("Client with a verifier — the open path", () => {
       { verifier: v },
     );
 
-    await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" });
+    await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" });
 
     expect(seen).toHaveLength(1);
     // `escrowKey()` renames these two; `verifyEscrowKey` reads the wire
@@ -366,7 +369,7 @@ describe("Client with a verifier — the open path", () => {
       { verifier: verifier({ entries: () => ESCROW_ACTIVE }) },
     );
 
-    const refusal = await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" }).catch((e: unknown) => e);
+    const refusal = await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" }).catch((e: unknown) => e);
 
     expect(refusal).toBeInstanceOf(EscrowKeyUnverified);
     expect((refusal as Error).message).toMatch(/did not verify/);
@@ -389,7 +392,7 @@ describe("Client with a verifier — the open path", () => {
       { verifier: verifier({ entries: () => [...ACTIVE, ...ESCROW_ACTIVE] }) },
     );
 
-    const refusal = await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" }).catch((e: unknown) => e);
+    const refusal = await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" }).catch((e: unknown) => e);
 
     expect(refusal).toBeInstanceOf(EscrowKeyUnverified);
     // The refusal is the *verification* one, not "this client has no verifier":
@@ -408,8 +411,8 @@ describe("Client with a verifier — the open path", () => {
       { verifier: verifier({ entries: () => ESCROW_ACTIVE }) },
     );
 
-    await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" });
-    await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "again" });
+    await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" });
+    await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "again" });
 
     expect(funded(calls)).toHaveLength(2);
     expect(keyReads(calls)).toHaveLength(1);
@@ -438,9 +441,9 @@ describe("Client with a verifier — the open path", () => {
       { verifier: verifier({ entries: () => ESCROW_ACTIVE }), clock: () => clock },
     );
 
-    await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" });
+    await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" });
     clock += 3 * 3600 - 1;
-    await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "again" });
+    await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "again" });
 
     expect(funded(calls)).toHaveLength(2);
     expect(keyReads(calls)).toHaveLength(1);
@@ -454,11 +457,11 @@ describe("Client with a verifier — the open path", () => {
       { verifier: verifier({ entries: () => ESCROW_ACTIVE }), clock: () => clock },
     );
 
-    await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" });
+    await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" });
     // Past the cache's own TTL. The verifier's wall clock is stopped at `NOW`,
     // so the announcement is still fresh — only the cache aged.
     clock += 3 * 3600 + 1;
-    await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "again" });
+    await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "again" });
 
     expect(funded(calls)).toHaveLength(2);
     expect(keyReads(calls)).toHaveLength(2);
@@ -479,10 +482,10 @@ describe("Client with a verifier — the open path", () => {
       { verifier: verifier({ entries: () => ESCROW_ACTIVE }), clock: () => clock },
     );
 
-    await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" });
+    await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" });
     // Exactly `now === escrowKeyExpiresAt`. Under `<=` this would be a cache hit.
     clock += 3 * 3600;
-    await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "again" });
+    await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "again" });
 
     expect(funded(calls)).toHaveLength(2);
     expect(keyReads(calls)).toHaveLength(2);
@@ -501,9 +504,9 @@ describe("Client with a verifier — the open path", () => {
         { verifier: verifier({ entries: () => ESCROW_ACTIVE }) },
       );
 
-      await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" });
+      await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" });
       now.mockReturnValue((NOW + 4 * 3600) * 1000);
-      await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "again" });
+      await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "again" });
 
       expect(funded(calls)).toHaveLength(2);
       expect(keyReads(calls)).toHaveLength(2);
@@ -536,7 +539,7 @@ describe("Client with a verifier — the open path", () => {
       },
     );
 
-    const raised = await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" }).catch((e: unknown) => e);
+    const raised = await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" }).catch((e: unknown) => e);
 
     expect(raised).toBeInstanceOf(TransportError);
     expect(raised).not.toBeInstanceOf(EscrowKeyUnverified);
@@ -573,7 +576,7 @@ describe("Client with a verifier — the open path", () => {
       },
     );
 
-    await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi", confidential: true });
+    await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi", confidential: true });
 
     expect(captured.designated).toBe(0);
     expect(providerReads(calls)).toHaveLength(0);
@@ -599,7 +602,7 @@ describe("Client with a verifier — the open path", () => {
       },
     );
 
-    await c.submit({ rateIn: "1", rateOut: "1", model: "m", input: "hi" });
+    await c.submit({ maxRateIn: "0.0001", maxRateOut: "0.0001", model: "m", input: "hi" });
 
     expect(keyReads(calls)).toHaveLength(1);
     expect(captured.designated).toBe(0);
@@ -621,6 +624,8 @@ describe("batch lines (R9)", () => {
       payloadInput: { input: "hi" },
       window: "24h",
       url: "/v1/responses",
+      rateIn: "0",
+      rateOut: "0",
       ctx,
     });
 
@@ -647,6 +652,8 @@ describe("batch lines (R9)", () => {
       payloadInput: { input: "hi" },
       window: "24h",
       url: "/v1/responses",
+      rateIn: "0",
+      rateOut: "0",
       provider: 7,
       ctx,
     });
@@ -658,5 +665,54 @@ describe("batch lines (R9)", () => {
     // `confidential` defaults to `false` by omission, so the verifier is never
     // asked about a designated batch line.
     expect(spy).not.toHaveBeenCalled();
+  });
+});
+
+describe("an input ceiling alone, with no provider named", () => {
+  it("is matched to a provider within it and signs that provider's ask on both sides", async () => {
+    // No verifier: a matched order is sealed to the provider, never the escrow key.
+    const captured: Captured = {};
+    const { client: c, calls } = client([...baseRoutes(), jobsRoute(captured)]);
+
+    await c.submit({ maxRateIn: "0.05", model: "m", input: "hi" });
+
+    const probe = probes(calls).map((p) => p.body as Record<string, unknown>);
+    expect(probe).toHaveLength(1);
+    expect(probe[0]).toMatchObject({ designated: 0, max_rate_in: "0.05" });
+    expect(probe[0]).not.toHaveProperty("max_rate_out");
+    // Provider 1 asks 0.001 / 0.002: the output side takes its rate, not zero.
+    expect([captured.rate_in, captured.rate_out, captured.designated]).toEqual(["0.001", "0.002", 1]);
+    expect(keyReads(calls)).toHaveLength(0);
+    expect(opened(captured).input).toEqual({ input: "hi" });
+  });
+
+  it("rests open at the ceiling and the market output rate when no provider is within it", async () => {
+    const captured: Captured = {};
+    const { client: c, calls } = client(
+      [
+        [/\/key$/, () => json(staticAnnouncement({ key: RECIPIENT_PUBLIC }))],
+        ...baseRoutes(),
+        jobsRoute(captured),
+      ],
+      { verifier: new Verifier("http://chain", { wallClock: () => NOW, fetch: refusingFetch() }) },
+    );
+
+    await c.submit({ maxRateIn: "0.0005", model: "m", input: "hi" });
+
+    // The second probe names no ceiling: it is where the output rate comes from.
+    expect(probes(calls)).toHaveLength(2);
+    expect([captured.rate_in, captured.rate_out, captured.designated]).toEqual(["0.0005", "0.002", 0]);
+    expect(keyReads(calls)).toHaveLength(1);
+    expect(opened(captured).input).toEqual({ input: "hi" });
+  });
+
+  it("is refused without a verifier when it would rest open, with nothing signed", async () => {
+    const captured: Captured = {};
+    const { client: c, calls } = client([...baseRoutes(), jobsRoute(captured)]);
+
+    await expect(c.submit({ maxRateIn: "0.0005", model: "m", input: "hi" })).rejects.toBeInstanceOf(
+      EscrowKeyUnverified,
+    );
+    expect(posts(calls)).toHaveLength(0);
   });
 });

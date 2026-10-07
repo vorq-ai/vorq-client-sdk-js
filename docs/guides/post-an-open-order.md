@@ -1,11 +1,11 @@
 ---
 title: Post an open order
-description: Submit a job without naming a provider, so any provider that meets your price can claim it.
+description: Let an order rest at your price when no provider is within it, so any provider that accepts it can claim it.
 ---
 
-A designated order (`provider: N`) is sealed to one provider and only that provider can serve
-it. An **open** order names no provider: it rests on the book and any provider whose ask your
-bid meets can claim it. How the payload stays sealed on that path is explained in
+An order goes to the first provider asking at or under its ceilings. When none is, and the order
+names no `provider`, it becomes an **open** order: it rests on the book at its ceilings and any
+provider that accepts those rates can claim it. How the payload stays sealed on that path is explained in
 [Sealing and keys](../concepts/sealing-and-keys.md#open-orders).
 
 ## Build the client with a verifier
@@ -25,26 +25,27 @@ const client = new Client({
 });
 ```
 
-## Submit without a provider
+## Submit under the market
 
 ```ts
-const floors = await client.floors({ model: modelId, sla: "async" });
-const floor = floors.floors[0];
-
 const handle = await client.submit({
   model,
   input: "Summarize the attached notes in three bullet points.",
   sla: "async",
-  rateIn: floor.rateIn,
-  rateOut: floor.rateOut,
-  // no provider: an open order
+  maxRateIn: "0.04",
+  maxRateOut: "0.12",
+  // no provider: rests open when nobody asks this little
 });
 ```
 
-`floors` gives the cheapest input and output rate across listed providers for the window. The
-two may come from different providers, so bidding exactly the floor on both sides is not
-guaranteed to meet any single ask; bid at or above one provider's ask from `client.asks()` to be
-sure. A bid below every ask rests until the order expires, and then ends as `expired`.
+`client.asks()` lists what providers ask today. With ceilings at or above one provider's ask on
+both sides, the order is matched to it straight away and pays that ask; with ceilings under
+every ask, it rests at them until a provider accepts or the order expires, and then ends as
+`expired`.
+
+Name only one ceiling and the other side rests at the market rate, the rate of the cheapest
+live ask for the job. See
+[How the rates are chosen](../reference/submit.md#how-the-rates-are-chosen).
 
 ## When it is refused
 

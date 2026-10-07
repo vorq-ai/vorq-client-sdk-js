@@ -42,6 +42,7 @@ import {
   json,
   openEnvelope,
   posts,
+  probes,
 } from "./helpers/submit-harness.js";
 import type { Call, Route } from "./helpers/submit-harness.js";
 import {
@@ -1182,22 +1183,24 @@ describe("sealingFetch — create, retrieve and cancel", () => {
     expect(order.job_id).toBe(body.id);
   });
 
-  it("carries the vorq block's bid and window into the signed order", async () => {
+  it("carries the vorq block's ceilings and window into the order, which signs the ask", async () => {
     const h = sealedNode();
     await post(h.fetch, {
       model: "m",
       input: "hi",
-      vorq: { provider: 1, rate_in: "1", rate_out: "2.5", sla: "24h" },
+      vorq: { provider: 1, max_rate_in: "1", max_rate_out: "2.5", sla: "24h" },
     });
 
     const { order, envelope } = submitted(h.calls);
-    expect(order.rate_in).toBe("1");
-    expect(order.rate_out).toBe("2.5");
+    expect(probes(h.calls)[0]!.body).toMatchObject({ max_rate_in: "1", max_rate_out: "2.5" });
+    // Provider 1's ask, which is under both ceilings.
+    expect(order.rate_in).toBe("0.001");
+    expect(order.rate_out).toBe("0.002");
     // The window the block named, on the signed terms — not the "1h" default.
     expect(order.sla_secs).toBe(86400);
     expect(order.designated).toBe(1);
-    // The bid is the coordinator's business and the payload is not: neither the
-    // rates nor the SLA are inside the seal.
+    // The ceilings are the coordinator's business and the payload is not: neither
+    // the rates nor the SLA are inside the seal.
     expect(JSON.stringify(envelope)).not.toContain("rate_in");
     expect(envelope.input).toEqual({ input: "hi" });
   });
@@ -1224,7 +1227,7 @@ describe("sealingFetch — create, retrieve and cancel", () => {
     const response = await post(h.fetch, {
       model: "m",
       input: "secret prompt",
-      vorq: { rate_in: "1", rate_out: "1" },
+      vorq: { max_rate_in: "0.0001", max_rate_out: "0.0001" },
     });
 
     expect(posts(h.calls)).toEqual([]);
@@ -1235,7 +1238,7 @@ describe("sealingFetch — create, retrieve and cancel", () => {
 
   it("rests an open order on a transport whose client has a verifier", async () => {
     const h = sealedNode({ escrow: true });
-    const response = await post(h.fetch, { model: "m", input: "hi", vorq: { rate_in: "1", rate_out: "1" } });
+    const response = await post(h.fetch, { model: "m", input: "hi", vorq: { max_rate_in: "0.0001", max_rate_out: "0.0001" } });
 
     expect(response.status).toBe(200);
     expect((await response.json()).status).toBe("completed");

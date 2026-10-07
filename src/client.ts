@@ -8,7 +8,7 @@
 
 import type { Hex } from "viem";
 
-import { ChainContext, OrderTerms, capFor, parseRate, paymentDomain } from "./terms.js";
+import { ChainContext, OrderTerms, capFor, parseCeiling, parseRate, paymentDomain } from "./terms.js";
 // A value import, and the reason `batches.ts` may only import from here with
 // `import type`: two runtime imports would be a real module cycle.
 import { Batches } from "./batches.js";
@@ -356,13 +356,18 @@ export interface SubmitArgs {
   input: string | Record<string, unknown>;
   /** A tier name (`async` / `batch`) or a raw window (`1h` / `24h`). */
   sla?: string;
-  /** USD per 1M units of work, as a decimal string: `"0.05"`. A number or bigint is refused. */
-  rateIn?: string | null;
-  rateOut?: string | null;
   /**
-   * The provider this order is designated to. Its absence is an **open** order,
-   * sealed to the coordinator's verified escrow key — which needs a client built
-   * with `verifier`, and is refused before any request without one (R5).
+   * The most the order pays, in USD per 1M units of work, as a decimal string:
+   * `"0.05"`. A number or bigint is refused. A side left out has no ceiling.
+   * The order signs the ask of the first provider within the ceilings; when
+   * none is, it rests at them, a side with no ceiling at the market rate.
+   */
+  maxRateIn?: string | null;
+  maxRateOut?: string | null;
+  /**
+   * The only provider this order may go to. Without one, an order no provider
+   * is within the ceilings of rests **open**, sealed to the coordinator's
+   * verified escrow key — which needs a client built with `verifier` (R5).
    */
   provider?: number;
   /** Check the input against the model's published schema first. Default `true`. */
@@ -433,9 +438,9 @@ export interface SealLineArgs {
    * has one; a `POST /v1/jobs` body does not, so `submit` sets it and ignores it.
    */
   url: string;
-  /** USD per 1M units of work, as a decimal string. */
-  rateIn?: string | null;
-  rateOut?: string | null;
+  /** The rates the order signs: USD per 1M units of work, as decimal strings. */
+  rateIn: string;
+  rateOut: string;
   provider?: number;
   /**
    * Demand attestation for this line's recipient. Set by `submit`; the batch
@@ -1184,8 +1189,8 @@ export class Client {
     // guards the door callers actually use, and does it **before** the two
     // network reads that stand between `sealLine` and its own check.
     // **Own properties only on the caller's args record** (`own.ts`). `provider`
-    // decides who the payload is sealed to and `rateIn`/`rateOut`/`sla` are
-    // signed, settled terms, so a bare read lets a polluted prototype state
+    // decides who the payload is sealed to and `maxRateIn`/`maxRateOut`/`sla`
+    // bound signed, settled terms, so a bare read lets a polluted prototype state
     // terms — and a recipient — that this SDK then signs on the caller's behalf.
     // One guard for the whole method.
     const arg = <K extends keyof SubmitArgs>(key: K): SubmitArgs[K] =>
@@ -1225,23 +1230,22 @@ export class Client {
     const units = declareUnits(payloadInput, arg("unitsOut"));
     const ctx = await this.chainContext();
 
-    // **No bid named is the market.** An unsigned probe asks the node for every
-    // live ask ranked; the order then bids the first candidate's own ask, pinned
-    // to it. With `provider` the probe is pinned too, so the answer is that
-    // provider's ask or nothing.
-    let rateIn = arg("rateIn");
-    let rateOut = arg("rateOut");
-    let provider = arg("provider");
-    if ((rateIn === undefined || rateIn === null) && (rateOut === undefined || rateOut === null)) {
-      ({ rateIn, rateOut, provider } = await this.market({
-        model: arg("model"),
-        window,
-        provider,
-        confidential: Boolean(arg("confidential")),
-        unitsIn: units.unitsIn,
-        unitsOut: units.unitsOut,
-      }));
-    }
+    // **The rates come from the market.** An unsigned probe asks the node for
+    // every live ask within the ceilings, ranked; the order signs the first
+    // candidate's own ask, pinned to it. With `provider` the probe is pinned
+    // too, so the answer is that provider's ask or nothing. An order nothing is
+    // within rests at its ceilings.
+    const { rateIn, rateOut, provider } = await this.market({
+      model: arg("model"),
+      window,
+      provider: arg("provider"),
+      confidential: Boolean(arg("confidential")),
+      unitsIn: units.unitsIn,
+      unitsOut: units.unitsOut,
+      maxIn: parseCeiling(arg("maxRateIn"), "maxRateIn", ctx.decimals),
+      maxOut: parseCeiling(arg("maxRateOut"), "maxRateOut", ctx.decimals),
+      decimals: ctx.decimals,
+    });
 
     // -- the recipient, and therefore the container --------------------------
     //
@@ -1826,23 +1830,18 @@ export class Client {
    * post an order against whatever model happens to be first.
    */
   /**
-   * The market for an order that names no bid: the first candidate the node
-   * ranks, and its own ask.
+   * The live asks within the ceilings, as the node ranks them.
    *
    * The probe is `POST /v1/jobs` with no rates and no signature. It commits to
    * nothing, so it costs no wallet prompt, and the node answers `402` with the
    * live asks ranked (cheapest for this job, then least recently picked) and no
-   * quote. Under `confidential` an unpinned list is filtered to candidates whose
-   * record verifies. No candidate raises before anything is signed.
+   * quote.
    */
-  private async market(args: {
-    model: string;
-    window: string;
-    provider: number | null | undefined;
-    confidential: boolean;
-    unitsIn: number;
-    unitsOut: number;
-  }): Promise<{ rateIn: string; rateOut: string; provider: number }> {
+  private async probe(
+    args: MarketArgs,
+    maxIn: bigint | null,
+    maxOut: bigint | null,
+  ): Promise<MarketCandidate[]> {
     const pinned = args.provider !== undefined && args.provider !== null;
     const response = await this.transport.request("POST", "/v1/jobs", {
       json: {
@@ -1851,6 +1850,8 @@ export class Client {
         units_in: args.unitsIn,
         units_out: args.unitsOut,
         designated: pinned ? args.provider : 0,
+        ...(maxIn === null ? {} : { max_rate_in: formatUsd(maxIn, args.decimals) }),
+        ...(maxOut === null ? {} : { max_rate_out: formatUsd(maxOut, args.decimals) }),
       },
       retry: false,
       allowStatuses: [402],
@@ -1867,17 +1868,60 @@ export class Client {
     try {
       body = await response.json();
     } catch {
-      // An unreadable body names no candidates, and is refused below as one.
+      // An unreadable body names no candidates.
     }
-    let candidates = candidatesOf(body);
-    if (candidates.length === 0) {
-      throw new ValidationError(
-        `${pinned ? `provider ${args.provider} is not` : "no provider is"} serving ${args.model} ` +
-          `in the ${args.window} window right now; nothing was signed. Try another window or ` +
-          "model, or pass rateIn and rateOut to post a bid that rests until a provider takes it",
-        { type: "invalid_request_error" },
-      );
+    return candidatesOf(body);
+  }
+
+  /**
+   * Where an order no live ask is within rests: at its ceilings.
+   *
+   * An order signs both rates, so a side with no ceiling takes the market's:
+   * the rate of the cheapest live ask for this job, read by a second probe
+   * that names no ceiling. With no ceiling on either side, or no live ask to
+   * take the unnamed side from, there is nothing to rest at.
+   */
+  private async resting(
+    args: MarketArgs,
+  ): Promise<{ rateIn: string; rateOut: string; provider: number | undefined }> {
+    const pinned = args.provider !== undefined && args.provider !== null;
+    let { maxIn, maxOut } = args;
+    if (maxIn === null || maxOut === null) {
+      const market = maxIn === null && maxOut === null ? [] : await this.probe(args, null, null);
+      const first = market[0];
+      if (first === undefined) {
+        throw new ValidationError(
+          `${pinned ? `provider ${args.provider} is not` : "no provider is"} serving ${args.model} ` +
+            `in the ${args.window} window right now; nothing was signed. Try another window or ` +
+            "model, or pass maxRateIn and maxRateOut to post an order that rests until a " +
+            "provider takes it",
+          { type: "invalid_request_error" },
+        );
+      }
+      const ask = askOf(first, args.decimals);
+      maxIn ??= ask.rateIn;
+      maxOut ??= ask.rateOut;
     }
+    return {
+      rateIn: formatUsd(maxIn, args.decimals),
+      rateOut: formatUsd(maxOut, args.decimals),
+      provider: pinned ? (args.provider as number) : undefined,
+    };
+  }
+
+  /**
+   * The rates an order signs and who it goes to: the first ask within its
+   * ceilings, or where it rests.
+   *
+   * Under `confidential` an unpinned list is filtered to candidates whose
+   * record verifies.
+   */
+  private async market(
+    args: MarketArgs,
+  ): Promise<{ rateIn: string; rateOut: string; provider: number | undefined }> {
+    const pinned = args.provider !== undefined && args.provider !== null;
+    let candidates = await this.probe(args, args.maxIn, args.maxOut);
+    if (candidates.length === 0) return this.resting(args);
     // Unpinned and confidential: the node's ranking, filtered to what attests. A
     // pinned order is verified once, by `recipientFor`, which refuses rather
     // than substitutes.
@@ -1897,6 +1941,16 @@ export class Client {
       throw new VorqError(
         `the node answered a probe pinned to provider ${args.provider} with provider ` +
           `${chosen.provider_id}`,
+        { type: "api_error", statusCode: 402 },
+      );
+    }
+    const ask = askOf(chosen, args.decimals);
+    if (
+      (args.maxIn !== null && ask.rateIn > args.maxIn) ||
+      (args.maxOut !== null && ask.rateOut > args.maxOut)
+    ) {
+      throw new VorqError(
+        `the node named provider ${chosen.provider_id} at an ask above the ceilings the probe set`,
         { type: "api_error", statusCode: 402 },
       );
     }
@@ -2072,6 +2126,35 @@ export class Client {
 /** A JSON integer as a `bigint`, or `null` for anything else (a digit string included). */
 function jsonInt(value: unknown): bigint | null {
   return typeof value === "number" && Number.isSafeInteger(value) ? BigInt(value) : null;
+}
+
+/** What a market probe is asked about: the job, its pin and its ceilings (atomic, `null` for none). */
+interface MarketArgs {
+  model: string;
+  window: string;
+  provider: number | null | undefined;
+  confidential: boolean;
+  unitsIn: number;
+  unitsOut: number;
+  maxIn: bigint | null;
+  maxOut: bigint | null;
+  decimals: number;
+}
+
+/** A candidate's own ask, in the atomic units an order signs. */
+function askOf(candidate: MarketCandidate, decimals: number): { rateIn: bigint; rateOut: bigint } {
+  try {
+    return {
+      rateIn: parseRate(candidate.rate_in, "rate_in", decimals),
+      rateOut: parseRate(candidate.rate_out, "rate_out", decimals),
+    };
+  } catch (error) {
+    throw new VorqError(
+      `the node named provider ${candidate.provider_id} with an unreadable ask: ` +
+        (error as Error).message,
+      { type: "api_error", statusCode: 402 },
+    );
+  }
 }
 
 /** One market candidate: who, the key to seal to, and its ask. */

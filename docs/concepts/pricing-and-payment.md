@@ -3,8 +3,29 @@ title: Pricing and payment
 description: How rates, unit counts, the escrow cap and the payment authorization fit together.
 ---
 
-Every order states its own price. There is no price list the client accepts implicitly: you bid
-a rate for each side of the job, and a provider whose ask your bid meets claims it.
+Every order states its own price. You name the most you will pay for each side of the job, and
+the order signs the ask of a provider at or under it.
+
+## Cap what you pay
+
+The simplest order names one ceiling and no provider:
+
+```ts
+const handle = await client.submit({
+  model: "moonshotai/kimi-k3",
+  input: "Summarize the plot of Hamlet in three bullet points.",
+  maxRateIn: "0.6",       // never more than $0.60 per 1M input tokens
+});
+```
+
+`maxRateIn` protects you from being overcharged: the order never signs an input rate above it,
+whatever providers are asking when it is posted, and when a provider asks less you pay that. It
+caps the input side only; the output side pays the matched provider's ask unless you name
+`maxRateOut` too. This matters most in a [batch](../guides/submit-a-batch.md), where every line
+is signed and paid for in one call.
+
+Set it too low and no provider matches: the order
+[rests](../reference/submit.md#how-the-rates-are-chosen) and may expire without being served.
 
 ## Rates are USD per 1M units
 
@@ -18,13 +39,15 @@ a fraction finer than the payment token carries (6 digits for a 6-decimal token)
 rounded. The chain signs atomic token units, and the SDK converts at the token's `decimals`
 from `client.chainContext()`: `"0.05"` is `50000` at 6 decimals.
 
-Omit **both** rates and `submit` takes the [market](../reference/submit.md#no-bid-named): the
-first provider the coordinator ranks, at its own ask. Omit only one and that side is a bid of
-**zero**: the order is posted, no provider asking more claims it, and it expires.
+`maxRateIn` and `maxRateOut` are **ceilings**, each optional. `submit` asks the coordinator for
+the live asks within them and signs the first one's own rates, so you pay the ask and never
+more than a ceiling. A side you leave out has no ceiling: you pay the provider's ask there,
+whatever it is. When no provider is within the ceilings the order
+[rests](../reference/submit.md#how-the-rates-are-chosen) at them instead.
 
 ## Two sides, two unit counts
 
-The order signs `rateIn` and `rateOut`, and two unit counts the SDK derives from the request
+The order signs two rates, `rateIn` and `rateOut`, and two unit counts the SDK derives from the request
 before sealing:
 
 - **`units_in`**: the input. For text and embeddings, one unit per four bytes of the canonical

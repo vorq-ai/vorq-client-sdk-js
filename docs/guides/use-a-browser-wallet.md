@@ -83,7 +83,7 @@ Any prompt the user dismisses raises `WalletRejectedError` and sends nothing fur
 A page reload loses the handle but never the job. Save the id as soon as `submit` returns:
 
 ```ts
-const handle = await client.submit({ model, input, sla: "async", rateIn, rateOut, provider });
+const handle = await client.submit({ model, input, sla: "async", maxRateIn, maxRateOut, provider });
 localStorage.setItem("vorq:pending", handle.id);
 
 // after a reload:

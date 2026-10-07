@@ -12,8 +12,8 @@ interface SubmitArgs {
   model: string;
   input: string | Record<string, unknown>;
   sla?: string;                                   // default "batch"
-  rateIn?: string | null;                         // USD per 1M units, e.g. "0.05"
-  rateOut?: string | null;
+  maxRateIn?: string | null;                      // USD per 1M units, e.g. "0.05"
+  maxRateOut?: string | null;
   provider?: number;
   validateParams?: boolean;                       // default true
   confidential?: boolean;                         // default false
@@ -21,6 +21,15 @@ interface SubmitArgs {
   customId?: string;
 }
 ```
+
+```ts
+// One ceiling, no provider: never more than $0.60 per 1M input tokens.
+const handle = await client.submit({ model: "moonshotai/kimi-k3", input: "Hello", maxRateIn: "0.6" });
+```
+
+A ceiling protects you from being overcharged: the order signs the matched provider's ask, and
+never a rate above the ceiling on that side. Set it too low and no provider matches: the order
+[rests](#how-the-rates-are-chosen) and may expire without being served.
 
 Submissions are always sealed: a client missing its `signer` or `cipher` raises
 `ValidationError` before anything is sent. The returned handle is described in
@@ -34,9 +43,9 @@ Submissions are always sealed: a client missing its `signer` or `cipher` raises
 | `model` | `string` | — | A model id from [`client.models.list()`](./models.md). A model the catalog gives no numeric `model_id` raises `ValidationError`. |
 | `input` | `string \| object` | — | A `string` is shorthand for `{ input: string }`. An object is the model's own input, sealed as-is. |
 | `sla` | `string` | `"batch"` | A tier (`"async"` / `"batch"`) or a window (`"1h"` / `"24h"`). See [SLA windows](#sla-windows). |
-| `rateIn` | `string \| null` | `null` | The input-side bid in [USD per 1M units](../concepts/pricing-and-payment.md#rates-are-usd-per-1m-units), e.g. `"0.05"`. With both rates `null`, the order takes the market (see [No bid named](#no-bid-named)); with only one `null`, that side bids zero. |
-| `rateOut` | same | `null` | The output-side bid, same unit. |
-| `provider` | `number` | — | A provider's registry id; the payload is sealed to its published key. With no rates named, the bid is this provider's ask, and `ValidationError` is raised when it is not live for the model. Omit, with rates named, for an [open order](../guides/post-an-open-order.md). |
+| `maxRateIn` | `string \| null` | `null` | The most the order pays for the input side, in [USD per 1M units](../concepts/pricing-and-payment.md#rates-are-usd-per-1m-units), e.g. `"0.05"`. `null` is no ceiling on that side. See [How the rates are chosen](#how-the-rates-are-chosen). |
+| `maxRateOut` | same | `null` | The most it pays for the output side, same unit. |
+| `provider` | `number` | — | A provider's registry id. Only its ask is considered, and the payload is sealed to its published key. Omit it and an order no provider is within rests as an [open order](../guides/post-an-open-order.md). |
 | `validateParams` | `boolean` | `true` | Run [local validation](#local-validation) before sealing. |
 | `confidential` | `boolean` | `false` | Verify the named provider's attestation evidence before sealing to it. Requires a `verifier`. |
 | `unitsOut` | `number` | derived | The output unit count, exactly, overriding [the derived value](#units). A non-negative integer; `0` for an embedding. |
@@ -46,11 +55,11 @@ Submissions are always sealed: a client missing its `signer` or `cipher` raises
 exponent, or more fraction digits than the payment token carries raises `ValidationError`; a rate
 is never rounded. The order signs the atomic value (`"0.05"` is `50000` at 6 decimals).
 
-**Recipient.** With `provider`, or with no rates (the market pins one), the payload is sealed
-to the key in that provider's registry record (`GET /evm/providers/{id}`); a record with no key
-raises `VerificationError`. With rates and no `provider`, the payload is sealed to the
-coordinator's verified escrow key, which requires a `verifier`; without one, or if the key does
-not verify, `EscrowKeyUnverified` is raised and nothing is posted.
+**Recipient.** An order matched to a provider, or resting with `provider` named, is sealed to
+the key in that provider's registry record (`GET /evm/providers/{id}`); a record with no key
+raises `VerificationError`. An order resting with no `provider` is sealed to the coordinator's
+verified escrow key, which requires a `verifier`; without one, or if the key does not verify,
+`EscrowKeyUnverified` is raised and nothing is posted.
 
 **`confidential: true`** without a `verifier` raises `ValidationError` before any request. With
 one, the named provider's evidence must verify or `VerificationError` is raised; another
@@ -60,19 +69,30 @@ on that path anyway.
 `stream`, `metadata` and `user` are not job params: a sealed result is delivered once, at
 settlement, and a caller-chosen identifier would link your jobs to each other across providers.
 
-## No bid named
+## How the rates are chosen
 
-With neither `rateIn` nor `rateOut`, `submit` first asks the coordinator for the market: a
-`POST /v1/jobs` with no rates and no signature, so it costs no wallet prompt. The coordinator
-answers with every live provider that has a free slot and an ask in the order's window, ranked
-by what this job would cost at their ask, and among equal prices the provider picked least
-recently first. `submit` bids the first candidate's own ask and pins it, so providers at the same
-price take turns.
+`submit` first asks the coordinator for the market: a `POST /v1/jobs` with the job's model,
+window and units and your ceilings, no rates and no signature, so it costs no wallet prompt. The
+coordinator answers with every live provider that has a free slot and an ask at or under the
+ceilings, ranked by what this job would cost at their ask, and among equal prices the provider
+picked least recently first. `submit` signs the first candidate's **own ask** and pins the
+order to it, so providers at the same price take turns.
 
-With `provider` as well, the probe is pinned too, and the bid is that provider's ask. With
-`confidential: true` and no `provider`, the list is first filtered to candidates whose
-attestation verifies. When no provider is live for the model in the window, `ValidationError` is
-raised before anything is signed; name rates to post a bid that rests instead.
+With `provider` as well, the probe is pinned too, and the only candidate is that provider's
+ask. With `confidential: true` and no `provider`, the list is first filtered to candidates
+whose attestation verifies.
+
+When no provider is within the ceilings, the order **rests** until one accepts it or it
+expires. An order signs both rates, so it rests at:
+
+| Ceilings named | Rates the order rests at |
+| --- | --- |
+| both | your two ceilings |
+| one | your ceiling on that side, and the **market rate** on the other: the rate of the cheapest live ask for this job, read by a second probe |
+| none | nothing to rest at: `ValidationError` is raised before anything is signed |
+
+With one ceiling named and no live ask for the model in the window there is no market rate to
+take, and `ValidationError` is raised as well. A resting order is paid at the rates it signed.
 
 ## SLA windows
 

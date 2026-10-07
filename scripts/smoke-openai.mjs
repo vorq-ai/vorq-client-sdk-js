@@ -131,8 +131,8 @@ const created = await openai.responses.create({
   vorq: {
     provider,
     sla: window,
-    rate_in: ask.rateIn,
-    rate_out: ask.rateOut,
+    max_rate_in: ask.rateIn,
+    max_rate_out: ask.rateOut,
   },
 });
 console.log("job id    :", created.id);

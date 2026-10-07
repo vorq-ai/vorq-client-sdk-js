@@ -29,17 +29,21 @@ id.
 | `custom_id` | no | 1–64 characters, unique within the batch. Sealed inside the line; returned as `.customId` on the opened result. |
 | `url` | no | `/v1/responses` (default) or `/v1/embeddings`. Every line must name the same one. |
 | `body.model` | yes | The model id. |
-| `body.rate_in`, `body.rate_out` | no | The line's bid, as on `submit`. A line with neither is planned (below); with only one, the other side is zero. |
+| `body.max_rate_in`, `body.max_rate_out` | no | The line's ceilings, as `maxRateIn` / `maxRateOut` on `submit`. Each is optional. |
 | `body.units_out` | no | The output unit count, as `unitsOut` on `submit`. |
 | rest of `body` | | The model input. |
 
 Other line members (such as `method`) are ignored.
 
-**Unpriced lines are planned.** Before sealing, one `POST /v1/batches` with no file sends, per
-model, the count of lines naming neither rate and their summed units. The coordinator answers
-which providers take how many lines at which ask; no provider gets more than its on-chain
-capacity leaves free. Each such line bids its provider's ask and is pinned to it. If a model's
-lines do not all fit in the window, `ValidationError` is raised and nothing is signed.
+**Every line is planned.** Before sealing, one `POST /v1/batches` with no file sends, per model
+and pair of ceilings, the line count and summed units. The coordinator answers which providers
+within the ceilings take how many lines at which ask; no provider gets more than its on-chain
+capacity leaves free. Each planned line signs its provider's ask and is pinned to it.
+
+A line the plan cannot place **rests** at its ceilings, spread by `providers`. A side with no
+ceiling rests at the market rate, the cheapest live ask's, read by one more plan. If lines with
+no ceiling at all do not all fit in the window, or there is no live ask to take a market rate
+from, `ValidationError` is raised and nothing is signed.
 
 **`completionWindow`** is `"1h"` or `"24h"`, or `"async"` / `"batch"`. Anything else raises
 `ValidationError`.
@@ -48,7 +52,7 @@ lines do not all fit in the window, `ValidationError` is raised and nothing is s
 
 | Member | Type | Meaning |
 | --- | --- | --- |
-| `providers` | `number[]` | **Required.** Priced lines are designated round-robin across the list; unpriced lines ignore it. An empty array makes every priced line an **open order** sealed to the verified escrow key, which needs a client built with a `verifier` (else `EscrowKeyUnverified`). |
+| `providers` | `number[]` | **Required.** Resting lines are designated round-robin across the list; planned lines ignore it. An empty array makes every resting line an **open order** sealed to the verified escrow key, which needs a client built with a `verifier` (else `EscrowKeyUnverified`, before anything is sealed). |
 | `metadata` | `Record<string, string>` | Optional. At most 16 pairs, 64-character keys, 512-character values. **Stored in plaintext** on the batch record. |
 | `validateParams` | `boolean` | Default `true`. Validates each line's input against its model's schema, as on [`submit`](./submit.md#local-validation). |
 

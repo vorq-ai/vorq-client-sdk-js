@@ -49,13 +49,25 @@ console.log(response.output_text);
 
 ## Put VORQ terms in the `vorq` block
 
+```ts
+const response = await openai.responses.create({
+  model: "moonshotai/kimi-k3",
+  input: "Say hello.",
+  vorq: { sla: "batch", max_rate_in: "0.6" },   // never more than $0.60 per 1M input tokens
+} as OpenAI.Responses.ResponseCreateParamsNonStreaming);
+```
+
+`max_rate_in` protects you from being overcharged: the order never signs an input rate above
+it, and pays less when a provider asks less. Set it too low and no provider matches: the order
+[rests](../reference/submit.md#how-the-rates-are-chosen) and may expire without being served.
+
 | Key | Meaning |
 | --- | --- |
 | `sla` | The completion window, `"1h"` or `"24h"` (tier names `"async"` / `"batch"` also work). Defaults to `"1h"`. |
-| `rate_in` / `rate_out` | Your bid, in USD per 1M units as decimal strings (`"0.05"`). With neither, the order takes the [market](../reference/submit.md#no-bid-named): the first provider the coordinator ranks, at its own ask. With only one, the other side is zero. |
-| `provider` | A provider id. The request is sealed to that provider. Omitted with a bid named: an [open order](./post-an-open-order.md), which needs `sealingFetch({ verifier })`. |
+| `max_rate_in` / `max_rate_out` | The most the order pays, in USD per 1M units as decimal strings (`"0.05"`). Each is optional; the order signs the ask of the first provider within them. See [How the rates are chosen](../reference/submit.md#how-the-rates-are-chosen). |
+| `provider` | A provider id. Only its ask is considered, and the request is sealed to that provider. Without one, an order no provider is within the ceilings of rests as an [open order](./post-an-open-order.md), which needs `sealingFetch({ verifier })`. |
 
-With a bid named, no `vorq.provider` and no verifier, the request comes back as a `400`
+When such an order would rest with no `vorq.provider` and no verifier, the request comes back as a `400`
 (`openai.BadRequestError`) whose message names the escrow key; nothing is posted.
 
 ## Wait, or run in the background
