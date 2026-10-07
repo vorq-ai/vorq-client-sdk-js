@@ -59,7 +59,8 @@ await Promise.all(handles.map((h) => store.put(h.id, { status: "submitted" })));
 const results = await Promise.all(handles.map((h) => h.result()));
 ```
 
-Each handle polls about once a minute. For many requests of the same kind,
+Each handle polls once a minute at first; on the `24h` tier that slows to every 3 minutes after
+15 minutes of waiting and every 10 minutes after an hour. For many requests of the same kind,
 [a batch](./submit-a-batch.md) prices and uploads them together.
 
 ## Check without waiting

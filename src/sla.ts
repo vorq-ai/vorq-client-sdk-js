@@ -39,20 +39,50 @@ export function slaSeconds(window: string): number {
 }
 
 /**
- * The longest this SDK will wait between two reads of one job.
+ * The longest a window shorter than a day waits between two reads of one job.
  *
- * Sixty seconds, which is exactly what the `"1h"` window has always polled at
- * (`3600 / 60`). The cap introduces no pacing — it stops a **longer** window
- * from being polled **more slowly** than the fast one, which is what an
- * unbounded `slaSeconds / 60` actually did: a `"24h"` job slept 1440 s, so a
- * job settling one second after a read was reported settled twenty-four minutes
- * later, and the last sleep could consume the remaining budget and raise a
- * timeout on a job that had finished well inside its window.
+ * Sixty seconds, which is exactly what the `"1h"` window polls at (`3600 / 60`);
+ * shorter windows poll faster, down to two seconds.
  */
 export const MAX_POLL_INTERVAL_SECONDS = 60;
 
-/** SLA-paced poll interval, held in `[2, MAX_POLL_INTERVAL_SECONDS]` seconds. */
-export function pollInterval(window: string): number {
+/**
+ * The long-wait schedule: `[waited less than, interval]` in seconds, read top
+ * down, and `BATCH_POLL_INTERVAL_SECONDS` once every bound is passed. Once a
+ * minute for the first fifteen minutes, every three minutes for the rest of the
+ * first hour, every ten minutes after it.
+ *
+ * Stepped by time spent waiting, never by the window: work that has not come
+ * back in an hour is not about to, and a day of once-a-minute reads is 1440
+ * requests where this spends 168. The loops clamp every sleep to what is left
+ * of the timeout, so a long interval never sleeps past the deadline.
+ */
+export const BATCH_POLL_SCHEDULE: ReadonlyArray<readonly [number, number]> = [
+  [900, 60],
+  [3600, 180],
+];
+export const BATCH_POLL_INTERVAL_SECONDS = 600;
+
+/** Windows this long are paced by the schedule above rather than by the window. */
+const SCHEDULED_WINDOW_SECONDS = 86400;
+
+/** Poll interval `elapsed` seconds into a wait, per `BATCH_POLL_SCHEDULE`. */
+export function batchPollInterval(elapsed: number): number {
+  for (const [bound, interval] of BATCH_POLL_SCHEDULE) {
+    if (elapsed < bound) return interval;
+  }
+  return BATCH_POLL_INTERVAL_SECONDS;
+}
+
+/**
+ * Poll interval for one job, `elapsed` seconds into the wait.
+ *
+ * A window of a day or longer follows `batchPollInterval`. A shorter one is
+ * paced by the window — `slaSeconds / 60`, held in
+ * `[2, MAX_POLL_INTERVAL_SECONDS]` seconds.
+ */
+export function pollInterval(window: string, elapsed: number): number {
+  if (slaSeconds(window) >= SCHEDULED_WINDOW_SECONDS) return batchPollInterval(elapsed);
   return Math.min(Math.max(slaSeconds(window) / 60, 2), MAX_POLL_INTERVAL_SECONDS);
 }
 

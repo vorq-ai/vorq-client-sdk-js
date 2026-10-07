@@ -70,8 +70,10 @@ See [Persist and resume jobs](../guides/persist-and-resume-jobs.md).
 
 ## Waiting
 
-`handle.result()` reads the job, then polls every window ÷ 60 seconds, held between 2 and 60
-seconds (once a minute for both tiers), until the job is terminal. The wait is bounded by the
+`handle.result()` reads the job, then polls until the job is terminal. A `1h` job is read once
+a minute. A `24h` job is read once a minute for the first 15 minutes of the wait, every 3
+minutes for the rest of the first hour, and every 10 minutes after that. A batch waits on the
+same schedule as a `24h` job, with one read of the batch per poll whatever its line count. The wait is bounded by the
 window unless you pass a timeout. Running out raises `WaitTimeout` and leaves the job running.
 
 When the job is `completed`, the client reads the sealed result by its content id from a

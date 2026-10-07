@@ -123,11 +123,39 @@ describe("JobHandle.result", () => {
     expect(clock).toBeLessThanOrEqual(10);
   });
 
-  it("paces from the job's own SLA, clamped to [2, 60]", () => {
-    // The upper bound is what stops a "24h" job being read once every
-    // twenty-four minutes, which put the last sleep past the deadline.
-    expect(pollInterval("24h")).toBe(60);
-    expect(pollInterval("1m")).toBe(2);
+  it("paces a window shorter than a day from the job's own SLA, clamped to [2, 60]", () => {
+    expect(pollInterval("1h", 0)).toBe(60);
+    expect(pollInterval("1m", 0)).toBe(2);
+  });
+
+  it.each([
+    [3600, Array<number>(60).fill(60)],
+    [
+      86400,
+      [
+        ...Array<number>(15).fill(60),
+        ...Array<number>(15).fill(180),
+        ...Array<number>(138).fill(600),
+      ],
+    ],
+  ])("polls a %i s job on its schedule until the window closes", async (slaSecs, expected) => {
+    // A 24h job steps down — once a minute for 15 min, every 3 min to the hour,
+    // every 10 min after; a 1h job stays at once a minute.
+    const queued = row();
+    const { client } = fakeClient([
+      { ...queued, vorq: { ...(queued.vorq as Record<string, unknown>), sla_secs: slaSecs } },
+    ]);
+    let clock = 0;
+    const sleeps: number[] = [];
+    const handle = new JobHandle(client, "job_1", {
+      now: () => clock,
+      sleep: async (ms) => {
+        sleeps.push(ms / 1000);
+        clock += ms / 1000;
+      },
+    });
+    await expect(handle.result()).rejects.toBeInstanceOf(WaitTimeout);
+    expect(sleeps).toEqual(expected);
   });
 
   it("refuses a zero-length window rather than polling once and giving up", async () => {

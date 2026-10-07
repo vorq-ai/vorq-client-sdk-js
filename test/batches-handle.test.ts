@@ -38,6 +38,7 @@ describe("BatchHandle", () => {
     });
     // 600 s of budget against a 60 s poll interval: ten reads' worth, and this
     // batch settles on the third.
+    harness.handle.jobIds = Array.from({ length: 5000 }, (_, n) => `0x${n.toString(16)}`);
     const results = await harness.handle.results(600);
     expect(results).toHaveLength(3);
     expect(results[0]).toBeInstanceOf(TextResult);
@@ -51,6 +52,10 @@ describe("BatchHandle", () => {
     // incrementally: the files are frozen, so there is nothing to drain.
     expect(harness.contentReads).toEqual([harness.outputFileId, harness.errorFileId]);
     expect(harness.batchReads()).toBe(3);
+    // One read of the batch per tick whatever its line count: no line is ever
+    // polled as a job.
+    expect(harness.sleeps).toEqual([60, 60]);
+    expect(harness.calls.filter((c) => c.url.includes("/v1/jobs"))).toEqual([]);
     // Each row names its bytes and never carries them.
     expect(harness.blobReads).toEqual(["cid-a", "cid-b"]);
   });
@@ -125,29 +130,39 @@ describe("BatchHandle", () => {
   });
 
   it("paces and bounds itself by the batch's own completion_window", async () => {
-    // `1h`: a 3600 s default timeout and a 60 s interval, so the window closes
-    // on the 61st read. A handle that reached for a fixed default instead would
-    // run past this script (24h) or stop short of it.
+    // `1h`: a 3600 s default timeout — once a minute for fifteen minutes, then
+    // every three — so the window closes on the 31st read. A handle that
+    // reached for a fixed default instead would run past this script (24h) or
+    // stop short of it.
     const harness = handleHarness({
       completionWindow: "1h",
-      statuses: Array<string>(61).fill("in_progress"),
+      statuses: Array<string>(31).fill("in_progress"),
     });
     const error = await harness.handle.results().catch((e: unknown) => e);
     expect(error).toBeInstanceOf(WaitTimeout);
     expect((error as WaitTimeout).message).toContain("did not settle within 3600s");
-    expect(harness.batchReads()).toBe(61);
-    expect(harness.sleeps).toEqual(Array<number>(60).fill(60));
+    expect(harness.batchReads()).toBe(31);
+    expect(harness.sleeps).toEqual([
+      ...Array<number>(15).fill(60),
+      ...Array<number>(15).fill(180),
+    ]);
   });
 
   it("defaults to a 24h window when the batch row names none", async () => {
     const harness = handleHarness({
       completionWindow: null,
-      statuses: Array<string>(1441).fill("in_progress"),
+      statuses: Array<string>(169).fill("in_progress"),
     });
     const error = await harness.handle.results().catch((e: unknown) => e);
     expect(error).toBeInstanceOf(WaitTimeout);
     expect((error as WaitTimeout).message).toContain("did not settle within 86400s");
-    expect(harness.batchReads()).toBe(1441);
+    // Once a minute for 15 min, every 3 min to the hour, every 10 min after.
+    expect(harness.batchReads()).toBe(169);
+    expect(harness.sleeps).toEqual([
+      ...Array<number>(15).fill(60),
+      ...Array<number>(15).fill(180),
+      ...Array<number>(138).fill(600),
+    ]);
   });
 
   it("takes its deadline from the monotonic clock, not the wall clock", async () => {

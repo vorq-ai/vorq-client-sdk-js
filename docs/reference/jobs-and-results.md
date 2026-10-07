@@ -36,7 +36,9 @@ decimal string raises `VorqError`; every read of the row by `result()` does the 
 Polls until the job is terminal, then fetches the result by content id and opens it with the
 client's cipher.
 
-- Polls every window ÷ 60 seconds, held between 2 and 60 seconds.
+- Windows under 24 hours poll every window ÷ 60 seconds, held between 2 and 60 seconds. A `24h`
+  job polls every 60 seconds for the first 15 minutes of the wait, every 180 seconds until the
+  first hour is up, and every 600 seconds after.
 - Without `timeoutSeconds`, the wait is the job's window, counted from the call. A handle from
   `submit` knows the window; a handle from `client.job(id)` reads `vorq.sla_secs` from the job
   row, and assumes 1 hour if the row names none.

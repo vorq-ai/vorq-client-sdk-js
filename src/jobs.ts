@@ -338,23 +338,25 @@ export class JobHandle {
   /**
    * Poll until terminal, then return the result (or raise `JobFailed`).
    *
-   * Paced by the job's SLA — `slaSeconds / 60`, held between 2 s and
-   * `MAX_POLL_INTERVAL_SECONDS` (60 s). The upper bound is what stops a `"24h"`
-   * job being read once every twenty-four minutes, which put the last sleep of
-   * the loop past the deadline below. `timeoutSeconds` defaults to the job's
-   * SLA; on expiry raises `WaitTimeout` carrying `.jobId`.
+   * A window shorter than a day is paced by the window — `slaSeconds / 60`,
+   * held between 2 s and `MAX_POLL_INTERVAL_SECONDS` (60 s). A `"24h"` job is
+   * paced by time spent waiting: once a minute for the first fifteen minutes,
+   * every three minutes for the rest of the first hour, every ten minutes after
+   * it. `timeoutSeconds` defaults to the job's SLA; on expiry raises
+   * `WaitTimeout` carrying `.jobId`.
    */
   async result(timeoutSeconds?: number): Promise<TextResult | MediaResult | EmbeddingResult> {
     let job = await this.fetch();
     const window = this.windowFor(job);
     const timeout = timeoutSeconds ?? slaSeconds(window);
-    const interval = pollInterval(window);
-    const deadline = this.now() + timeout;
+    const start = this.now();
+    const deadline = start + timeout;
     while (!TERMINAL.has(statusOf(job))) {
       // Before the sleep, not after it: a sleep taken past the deadline is a
       // read the window paid for and never got, and it is how a job that
       // settled inside its window came back as a timeout.
-      const remaining = deadline - this.now();
+      const now = this.now();
+      const remaining = deadline - now;
       if (remaining <= 0) {
         throw new WaitTimeout(`Job ${this.id} did not settle within ${timeout}s.`, {
           jobId: this.id,
@@ -364,7 +366,7 @@ export class JobHandle {
       // would sleep past the deadline this loop is about to report, so a 10 s
       // wait on a `"24h"` job would block for a minute before saying it timed
       // out at ten seconds.
-      await this.sleep(Math.min(interval, remaining) * 1000);
+      await this.sleep(Math.min(pollInterval(window, now - start), remaining) * 1000);
       job = await this.fetch();
     }
     const status = statusOf(job);

@@ -6,9 +6,8 @@
  *   npm run smoke:batch
  *
  * Two lines, and the last carries no `custom_id` — the optional case, which must
- * still correlate by `job_id`. `1h`, not `24h`: the window IS the per-line SLA
- * and the SDK paces its polling from it, so a `24h` batch polls on a `24h`
- * cadence and the run never finishes.
+ * still correlate by `job_id`. `1h`, not `24h`: the window IS the per-line SLA,
+ * so a `24h` batch gives providers a day to answer and the run never finishes.
  *
  * `VORQ_PIN_GATEWAY` is **required, not an optimisation**: the coordinator serves
  * no blob endpoint, so it is the only path from a `result_cid` to the bytes it

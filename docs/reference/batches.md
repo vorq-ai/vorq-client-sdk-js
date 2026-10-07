@@ -77,7 +77,9 @@ param the model's schema refuses; an open batch without a verifier (`EscrowKeyUn
 | `consume(onResult, onError?, timeoutSeconds?)` | The same, one callback per line. Callbacks may return promises, which are awaited before it resolves. Without `onError`, `JobError` lines go to `onResult`. |
 | `cancel()` | Cancels lines no provider has claimed; claimed lines run to completion. Raises `ValidationError` unless the batch is `validating`, `in_progress` or `cancelling`. |
 
-- Waiting polls about once a minute. Without `timeoutSeconds` the wait is the batch's window;
+- Waiting polls once a minute for the first 15 minutes, every 3 minutes for the rest of the
+  first hour, and every 10 minutes after that. Each poll is one `GET /v1/batches/{id}`, whatever
+  the line count. Without `timeoutSeconds` the wait is the batch's window;
   on expiry it raises `WaitTimeout` whose `.jobId` is the batch id, and cancels nothing.
 - A `failed` batch (its input file was refused) raises `BatchFailed` with `.batchId`. A failed
   line is a `JobError`, never an exception.

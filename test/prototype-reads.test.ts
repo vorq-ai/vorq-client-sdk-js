@@ -183,7 +183,7 @@ import { SealedBoxCipher } from "../src/crypto/cipher.js";
 import { curvePublicKey, seal } from "../src/crypto/sealed-box.js";
 import { SEALED_RESULT_VERSION } from "../src/crypto/domains.js";
 import { fetchBlob, resolveGateway } from "../src/files.js";
-import { pollInterval, slaSeconds, windowFromSeconds } from "../src/sla.js";
+import { slaSeconds, windowFromSeconds } from "../src/sla.js";
 import { BrowserWalletSigner } from "../src/signer/browser-wallet.js";
 import type { ChainContext } from "../src/terms.js";
 import { CTX } from "./vectors-loader.js";
@@ -3198,16 +3198,18 @@ describe("batches — the batch a handle addresses and the results it returns", 
   });
 
   // Site: `own(batch, "completion_window")` in `BatchHandle.apply`.
-  it("paces no batch by a completion window the row never named", async () => {
-    const h = handleHarness({ statuses: ["validating", "completed"], completionWindow: null });
-    // `"2m"`, not `"1h"`: `pollInterval` is `slaSeconds/60` clamped to
-    // `[2, 60]`, and both `"1h"` and `"24h"` clamp to the same 60 — so a test
-    // written with `"1h"` cannot tell the two windows apart and passes with the
-    // guard reverted.
+  it("bounds no batch by a completion window the row never named", async () => {
+    const h = handleHarness({
+      statuses: ["validating", "in_progress", "in_progress", "completed"],
+      completionWindow: null,
+    });
+    // The window is the default timeout and nothing else — a batch is paced by
+    // time spent waiting. A polluted `"2m"` closes the wait at 120 s, before
+    // the third sleep this batch needs; the unnamed window is `"24h"`.
     await pollutedAsync("completion_window", "2m", async () => {
       await h.handle.results();
     });
-    expect(h.sleeps[0]).toBe(pollInterval("24h"));
+    expect(h.sleeps).toEqual([60, 60, 60]);
   });
 
   // Site: `own(batch, "request_counts")` in `BatchHandle.apply`.

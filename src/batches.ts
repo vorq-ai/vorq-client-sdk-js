@@ -53,7 +53,7 @@ import { formatUsd, isUsd, parseUsd } from "./money.js";
 import { parseCeiling } from "./terms.js";
 import { asBigInt } from "./scalars.js";
 import { declareUnits } from "./units.js";
-import { normalizeSla, pollInterval, slaSeconds } from "./sla.js";
+import { batchPollInterval, normalizeSla, slaSeconds } from "./sla.js";
 import type { SealLineArgs, SealedLine, VorqFile } from "./client.js";
 import type { Models } from "./models.js";
 import type { Cipher, Signer } from "./signer/types.js";
@@ -1037,14 +1037,17 @@ export class BatchHandle {
     let batch = await this.fetch();
     const window = this.completionWindow ?? "24h";
     const timeout = timeoutSeconds ?? slaSeconds(window);
-    const interval = pollInterval(window);
-    const deadline = this.now() + timeout;
+    const start = this.now();
+    const deadline = start + timeout;
     const pending: Promise<unknown>[] = [];
 
+    // One read of the batch per tick, whatever its line count: the lines are
+    // never polled one by one.
     while (!TERMINAL.has(BatchHandle.statusOf(batch))) {
       // Before the sleep, not after it: a sleep taken past the deadline is a
       // read the window paid for and never got.
-      const remaining = deadline - this.now();
+      const now = this.now();
+      const remaining = deadline - now;
       if (remaining <= 0) {
         throw new WaitTimeout(
           `Batch ${this.id} did not settle within ${timeout}s. Nothing was cancelled: ` +
@@ -1056,7 +1059,7 @@ export class BatchHandle {
       // Clamped to what is left, for the reason `JobHandle.result` clamps: an
       // interval longer than the remaining budget would sleep past the deadline
       // this loop is about to report.
-      await this.sleep(Math.min(interval, remaining) * 1000);
+      await this.sleep(Math.min(batchPollInterval(now - start), remaining) * 1000);
       batch = await this.fetch();
     }
 

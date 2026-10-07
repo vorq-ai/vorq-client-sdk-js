@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  MAX_POLL_INTERVAL_SECONDS,
+  batchPollInterval,
   knownWindowSeconds,
   normalizeSla,
   pollInterval,
@@ -50,16 +50,34 @@ describe("slaSeconds", () => {
   });
 });
 
+describe("batchPollInterval", () => {
+  it("steps at fifteen minutes and at one hour", () => {
+    expect(batchPollInterval(0)).toBe(60);
+    expect(batchPollInterval(899)).toBe(60);
+    expect(batchPollInterval(900)).toBe(180);
+    expect(batchPollInterval(3599)).toBe(180);
+    expect(batchPollInterval(3600)).toBe(600);
+    expect(batchPollInterval(86399)).toBe(600);
+  });
+});
+
 describe("pollInterval", () => {
-  it("is slaSeconds/60 held inside [2, 60]", () => {
-    expect(pollInterval("1h")).toBe(60);
-    expect(pollInterval("30m")).toBe(30);
+  it("is slaSeconds/60 held inside [2, 60] for a window shorter than a day", () => {
+    expect(pollInterval("1h", 0)).toBe(60);
+    expect(pollInterval("1h", 3599)).toBe(60);
+    expect(pollInterval("30m", 0)).toBe(30);
     // The floor: a 45 s window would otherwise be polled every 0.75 s.
-    expect(pollInterval("45s")).toBe(2);
-    // The cap is the point of the clamp: without it a 24h job sleeps 1440 s and
-    // is reported settled twenty-four minutes late.
-    expect(pollInterval("24h")).toBe(MAX_POLL_INTERVAL_SECONDS);
-    expect(pollInterval("batch")).toBe(60);
+    expect(pollInterval("45s", 0)).toBe(2);
+  });
+
+  it("follows the batch schedule for a window of a day or longer", () => {
+    // The rule is the duration, not the two windows this SDK names today: a
+    // network-added window passes through `slaSeconds` verbatim.
+    for (const window of ["24h", "batch", "168h"]) {
+      expect(pollInterval(window, 0)).toBe(60);
+      expect(pollInterval(window, 900)).toBe(180);
+      expect(pollInterval(window, 3600)).toBe(600);
+    }
   });
 });
 
