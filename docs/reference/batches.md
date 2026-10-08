@@ -46,7 +46,7 @@ no ceiling at all do not all fit in the window, or there is no live ask to take 
 from, `ValidationError` is raised and nothing is signed.
 
 **`completionWindow`** is `"1h"` or `"24h"`, or `"async"` / `"batch"`. Anything else raises
-`ValidationError`.
+`ValidationError`. A `"24h"` batch usually takes minutes to a few hours; 24 hours is the maximum.
 
 **`BatchSubmitOptions`**:
 

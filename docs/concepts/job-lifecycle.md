@@ -16,6 +16,8 @@ Every order signs a completion window, a maximum rather than an estimate:
 | `async` | `1h` | 1 hour |
 | `batch` | `24h` | 24 hours |
 
+A `batch` job usually takes minutes to a few hours; 24 hours is the maximum.
+
 The SDK accepts either spelling and signs the window in seconds. `submit` defaults to `batch`;
 the OpenAI-compatible transport defaults to `1h`.
 

@@ -73,7 +73,7 @@ When such an order would rest with no `vorq.provider` and no verifier, the reque
 ## Wait, or run in the background
 
 Without `background`, `responses.create` waits for the job, bounded by its window. A `"24h"` job
-can hold the call for up to a day, so use `background: true` whenever the wait might outlive the
+usually takes minutes to a few hours but can hold the call for up to a day, so use `background: true` whenever the wait might outlive the
 connection or, in a browser, the page:
 
 ```ts

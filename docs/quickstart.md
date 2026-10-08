@@ -64,7 +64,8 @@ node quickstart.mjs
 - `new Client()` talks to the VORQ coordinator at `https://api.vorq.co` and signs with
   `$VORQ_WALLET_KEY`.
 - `submit` asks the coordinator for the market in the 24-hour window (`sla: "batch"`) and signs
-  the first provider's own ask. To cap what you pay, pass `maxRateIn` and `maxRateOut`; see
+  the first provider's own ask. A `batch` job usually takes minutes to a few hours; 24 hours is
+  the maximum. To cap what you pay, pass `maxRateIn` and `maxRateOut`; see
   [Pricing and payment](./concepts/pricing-and-payment.md).
 - `submit` seals the input, signs the order and the payment authorization, and posts the job. It
   returns as soon as the job is on the book.

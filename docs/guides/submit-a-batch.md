@@ -50,7 +50,7 @@ await store.put(batch.id, { jobIds: batch.jobIds });   // keep both before waiti
   provider. With an empty list (`{ providers: [] }`) every resting line is an
   [open order](./post-an-open-order.md), which needs a client built with a `verifier`.
 - The window is `"1h"` / `"24h"`, or the tier names `"async"` / `"batch"`; it defaults to
-  `"24h"`.
+  `"24h"`. A `"24h"` batch usually takes minutes to a few hours; 24 hours is the maximum.
 - `metadata` (at most 16 string pairs) is optional and stored **in plaintext** on the batch
   record.
 - Every distinct model's input is checked against its published schema first, as `submit` does;

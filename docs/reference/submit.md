@@ -101,6 +101,8 @@ take, and `ValidationError` is raised as well. A resting order is paid at the ra
 | `"async"` | `"1h"` | 3600 |
 | `"batch"` | `"24h"` | 86400 |
 
+A `"batch"` job usually takes minutes to a few hours; 24 hours is the maximum.
+
 Other windows of the form `<n>h`, `<n>m` or `<n>s` are signed as written and validated by the
 network; a string of any other form is signed as 3600 s. Job rows report the window as `vorq.sla_secs`.
 
