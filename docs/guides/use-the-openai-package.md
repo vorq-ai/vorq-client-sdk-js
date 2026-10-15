@@ -27,7 +27,7 @@ const openai = new OpenAI({
 });
 
 const response = await openai.responses.create({
-  model: "moonshotai/kimi-k3",
+  model: "z-ai/glm-5.3",
   input: "Say hello.",
   // The openai types do not know the `vorq` field, so state the params type.
   vorq: { sla: "batch" },
@@ -51,9 +51,9 @@ console.log(response.output_text);
 
 ```ts
 const response = await openai.responses.create({
-  model: "moonshotai/kimi-k3",
+  model: "z-ai/glm-5.3",
   input: "Say hello.",
-  vorq: { sla: "batch", max_rate_in: "0.6" },   // never more than $0.60 per 1M input tokens
+  vorq: { sla: "batch", max_rate_in: "0.28" },   // never more than $0.28 per 1M input tokens
 } as OpenAI.Responses.ResponseCreateParamsNonStreaming);
 ```
 
@@ -78,7 +78,7 @@ connection or, in a browser, the page:
 
 ```ts
 let response = await openai.responses.create({
-  model: "moonshotai/kimi-k3",
+  model: "z-ai/glm-5.3",
   input: "Summarize the attached notes in three bullet points.",
   background: true,
   vorq: { sla: "batch" },

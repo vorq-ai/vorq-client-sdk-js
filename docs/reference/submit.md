@@ -23,8 +23,8 @@ interface SubmitArgs {
 ```
 
 ```ts
-// One ceiling, no provider: never more than $0.60 per 1M input tokens.
-const handle = await client.submit({ model: "moonshotai/kimi-k3", input: "Hello", maxRateIn: "0.6" });
+// One ceiling, no provider: never more than $0.28 per 1M input tokens.
+const handle = await client.submit({ model: "z-ai/glm-5.3", input: "Hello", maxRateIn: "0.28" });
 ```
 
 A ceiling protects you from being overcharged: the order signs the matched provider's ask, and
