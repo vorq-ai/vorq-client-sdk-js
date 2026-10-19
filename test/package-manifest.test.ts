@@ -58,12 +58,13 @@ describe("package manifest", () => {
     expect(typeof pkg.devDependencies.openai).toBe("string");
   });
 
-  it("declares a prerelease version", () => {
-    // A deliberate tripwire on the human, not on the code: `1.0.0` waits on the
-    // cross-language round trip against the Python SDK being green in CI. The
-    // day that gate is cleared, this test is deleted *and* the CHANGELOG says
-    // why — deleting it quietly is the failure mode it exists to catch.
-    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+-/);
+  it("declares a stable 0.x version", () => {
+    // A deliberate tripwire on the human, not on the code. Releases are stable
+    // from 0.2.0, one patch per release; `1.0.0` waits on the cross-language
+    // round trip against the Python SDK being green in CI. The day that gate is
+    // cleared, this test is deleted *and* the CHANGELOG says why — deleting it
+    // quietly is the failure mode it exists to catch.
+    expect(pkg.version).toMatch(/^0\.\d+\.\d+$/);
   });
 
   it("builds on prepack, so a manual publish cannot ship an empty package", () => {

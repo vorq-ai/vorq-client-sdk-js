@@ -20,7 +20,8 @@ Every release bumps the patch version (`0.2.0`, `0.2.1`, …), so the `^0.2.0` r
 
 ## [0.2.0] — 2026-10-19
 
-The first stable release.
+The first stable release. Releases are stable from here, one patch per release; `1.0.0` still
+waits on the cross-language round trip against the Python SDK being green in CI.
 
 ### Changed
 
