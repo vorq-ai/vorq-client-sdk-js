@@ -50,10 +50,9 @@
  *     `jobId`) share one `stated` guard, so one test covers them and reverting
  *     any *single* read is masked by the others — `jobId` alone still throws
  *     out of `BigInt(undefined)`. The measured revert is the helper itself.
- *   - `Client.floors` and `Client.jobsSummary` read every figure through the
- *     one `moneyFigure` guard, so reverting it reddens all three of
- *     the tests that pollute a wire figure: the floors row, the summary body
- *     and the `by_model` row. Each still isolates its own *record*, because
+ *   - `Client.jobsSummary` reads every figure through the one `moneyFigure`
+ *     guard, so reverting it reddens both tests that pollute a wire figure:
+ *     the summary body and the `by_model` row. Each still isolates its own *record*, because
  *     nothing else supplies these bodies.
  *   - **Five own-reads are masked and no test here reddens for them**, because
  *     an own-guard on the same key runs first: `verify.ts:799`
@@ -170,6 +169,7 @@ import {
   handleHarness,
   json,
   manifestRows,
+  marketCandidate,
   marketRoute,
   posts,
   probes,
@@ -1801,7 +1801,8 @@ describe("transport — the options record a request is issued from", () => {
  * A batch line arrives from the caller's array or from `JSON.parse` over a
  * JSONL file, and both are in scope. `rate_in`/`rate_out` on a line's body are
  * **signed, settled terms** — the batch path's version of the create-body
- * finding — and `providers` decides who each line is sealed to.
+ * finding — and `providers` and a body's `provider` decide who each line is
+ * sealed to.
  *
  * Every test drives the real `Batches.submit`; the sealing-loop tests read the
  * args that reached `Client.sealLine`, which is where a term becomes signed.
@@ -1887,9 +1888,9 @@ describe("batches — the lines and options a submit is built from", () => {
     const h = batchHarness({ gasFee: 7n });
     const sealLine = vi.spyOn(h.client, "sealLine");
     // The line names its output ceiling only, so the input side has none: it
-    // rests at the market's input rate, never the inherited 999.
+    // is planned at provider 1's input ask, never under the inherited 999.
     await pollutedAsync("max_rate_in", "999", async () => {
-      await h.client.batches.submit([{ body: { model: "m", max_rate_out: "0.0001" } }], "1h", {
+      await h.client.batches.submit([{ body: { model: "m", max_rate_out: "0.01" } }], "1h", {
         providers: [1],
       });
     });
@@ -1903,7 +1904,7 @@ describe("batches — the lines and options a submit is built from", () => {
     const h = batchHarness({ gasFee: 7n });
     const sealLine = vi.spyOn(h.client, "sealLine");
     await pollutedAsync("max_rate_out", "999", async () => {
-      await h.client.batches.submit([{ body: { model: "m", max_rate_in: "0.0001" } }], "1h", {
+      await h.client.batches.submit([{ body: { model: "m", max_rate_in: "0.01" } }], "1h", {
         providers: [1],
       });
     });
@@ -1924,18 +1925,19 @@ describe("batches — the lines and options a submit is built from", () => {
     expect(sealLine.mock.calls[0]![0].unitsOut).toBeUndefined();
   });
 
-  // Site: `own(opts, "providers")` in `submit`.
-  it("designates no provider from the options record's prototype", async () => {
+  // Sites: `own(opts, "providers")` in `submit` and `own(body, "provider")` in
+  // the pre-flight loop.
+  it("restricts no line from the options record's or a body's prototype", async () => {
     // **The batch path's version of the create finding.** An inherited
-    // `providers` seals every line to an operator the caller never named,
-    // instead of to the coordinator's verified escrow key. With the own-read,
-    // the list is empty — the line rests open — and this client has no
-    // verifier, so it fails closed before a byte is sealed.
+    // `providers` or `provider` seals every line to an operator the caller
+    // never named, instead of to the coordinator's verified escrow key. With
+    // the own-reads, nothing is restricted — the line rests open — and this
+    // client has no verifier, so it fails closed before a byte is sealed.
     const h = batchHarness({ gasFee: 7n });
-    await pollutedAsync("providers", [1], async () => {
-      await expect(
-        h.client.batches.submit([{ body: PRICED_LINE }], "1h", {} as { providers: number[] }),
-      ).rejects.toThrow(EscrowKeyUnverified);
+    await pollutedAllAsync([["providers", [1]], ["provider", 1]], async () => {
+      await expect(h.client.batches.submit([{ body: PRICED_LINE }], "1h", {})).rejects.toThrow(
+        EscrowKeyUnverified,
+      );
     });
     expect(h.termsOnlyPosts).toHaveLength(0);
     expect(h.uploads).toHaveLength(0);
@@ -1987,7 +1989,7 @@ describe("batches — the lines and options a submit is built from", () => {
  */
 describe("client — the provider record a payload is sealed to", () => {
   /** A row that states an id and nothing else — no `box_key` at all. */
-  const silentProvider: Route = [/\/evm\/providers\/\d+/, () => json({ id: 1 })];
+  const silentProvider: Route = [/\/evm\/providers\/\d+/, () => json({ id: 1, name: null })];
   const ATTACKER_KEY = `0x${"99".repeat(32)}`;
 
   // Site: `own(row, "box_key")` in `Client.providers`.
@@ -1999,9 +2001,11 @@ describe("client — the provider record a payload is sealed to", () => {
         ["operator", "0xattacker"],
         ["provider_id", 99],
         ["listed", true],
+        ["name", "attacker"],
       ],
       () => c.providers(1),
     );
+    expect(record.name).toBeNull();
     expect(record.boxKey).toBe("");
     expect(record.operator).toBe("");
     expect(record.providerId).toBe(0);
@@ -2011,11 +2015,14 @@ describe("client — the provider record a payload is sealed to", () => {
   // The same site, reached the way the finding was measured: through a real
   // batch submit, which is a **non-confidential designated** order.
   it("refuses a batch line whose provider publishes no box_key, under pollution", async () => {
-    // The plan places nobody, so the line rests on the provider it names.
+    // The plan places the line on provider 1, the one its list allows.
     const { client: c, calls } = client([
       silentProvider,
       ...baseRoutes(),
-      [/\/v1\/batches$/, () => json({ plan: [{ allocation: [] }] }, 402)],
+      [
+        /\/v1\/batches$/,
+        () => json({ plan: [{ allocation: [{ ...marketCandidate(1), lines: 1 }] }] }, 402),
+      ],
     ]);
     await pollutedAsync("box_key", ATTACKER_KEY, async () => {
       await expect(
@@ -2201,46 +2208,6 @@ describe("client — the escrow announcement, the file row and the listings", ()
       () => c.jobs(),
     );
     expect(calls.at(-1)!.url).toBe("http://node/evm/jobs");
-  });
-
-  // Site: `own(query, …)` in `Client.floors`.
-  it("sends no floors query parameter from the caller's query prototype", async () => {
-    const { client: c, calls } = client([
-      [/\/evm\/asks\/floors/, () => json({ floors: [] })],
-      ...baseRoutes(),
-    ]);
-    await pollutedAllAsync(
-      [
-        ["model", 7],
-        ["sla", 3600],
-        ["limit", 5],
-        ["offset", 3],
-      ],
-      () => c.floors(),
-    );
-    expect(calls.at(-1)!.url).toBe("http://node/evm/asks/floors");
-  });
-
-  // Site: `own(r, …)` on a floors row in `Client.floors`.
-  it("reads no floor field from the prototype, and refuses naming it", async () => {
-    // One key at a time, with the row stating every *other* one: read bare, the
-    // prototype completes the row and the floor parses as a real rate; read own,
-    // the figure is absent and the refusal names it. So reverting any single one
-    // of the four reads reddens this test.
-    for (const [key, value] of [
-      ["model_id", 9],
-      ["sla", 9],
-      ["rate_in", "999"],
-      ["rate_out", "999"],
-    ] as [string, unknown][]) {
-      const row: Record<string, unknown> = { model_id: 1, sla: 1, rate_in: "1", rate_out: "1" };
-      delete row[key];
-      const { client: c } = client([
-        [/\/evm\/asks\/floors/, () => json({ floors: [row] })],
-        ...baseRoutes(),
-      ]);
-      await expect(pollutedAsync(key, value, () => c.floors())).rejects.toThrow(key);
-    }
   });
 
   // Site: `own(body, …)` on the summary body in `Client.jobsSummary`.
@@ -3047,11 +3014,11 @@ describe("batches — the gas fee the whole file's payments are signed over", ()
       [/\/v1\/files$/, () => json({ id: "f", object: "file", purpose: "batch", bytes: 1 })],
       [
         /\/v1\/batches$/,
-        // The plan places nobody, so the line rests at its own terms.
+        // The plan places the line on provider 1, the one its list allows.
         (_n, body) =>
           Object.hasOwn(body as object, "input_file_id")
             ? json({ id: "b", object: "batch", status: "validating" })
-            : json({ plan: [{ allocation: [] }] }, 402),
+            : json({ plan: [{ allocation: [{ ...marketCandidate(1), lines: 1 }] }] }, 402),
       ],
     ]);
   const line = [{ body: PRICED_LINE }];

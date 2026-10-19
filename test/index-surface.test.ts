@@ -114,7 +114,7 @@ it("results are real classes", () => {
  */
 it("keeps the aggregate types on the barrel", () => {
   const barrel = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
-  for (const name of ["Floor", "FloorBook", "JobsSummary", "JobsSummaryModel", "SlaWindow"]) {
+  for (const name of ["JobsSummary", "JobsSummaryModel"]) {
     expect(barrel).toMatch(new RegExp(`\\b${name}\\b`));
   }
 });
@@ -140,17 +140,16 @@ async function pinTypeOnlySurface(): Promise<void> {
   const ctx: sdk.ChainContext = await client.chainContext();
   const allowlist: sdk.Allowlist = await client.allowlist();
   const entry: sdk.AllowlistEntry = allowlist.entries[0];
-  const sealArgs: sdk.SealLineArgs = { ...({} as sdk.SealLineArgs), ctx };
+  const memo: sdk.SealMemo = { records: new Map(), modelIds: new Map() };
+  const sealArgs: sdk.SealLineArgs = { ...({} as sdk.SealLineArgs), ctx, memo };
   const line: sdk.SealedLine = await client.sealLine(sealArgs);
   await client.payLine(line, 0n, ctx, 0n);
   const options: sdk.RequestOptions = { retry: false };
   await client.json("GET", "/v1/models", options);
   await client.request("GET", "/v1/models", options);
-  const floors: sdk.FloorBook = await client.floors({ model: 3 });
-  const floor: sdk.Floor = floors.floors[0];
   const summary: sdk.JobsSummary = await client.jobsSummary({ owner: "0x0" });
   const perModel: sdk.JobsSummaryModel = summary.byModel[0];
-  void [models, model, ctx, allowlist, entry, sealArgs, line, options, floors, floor, summary, perModel];
+  void [models, model, ctx, allowlist, entry, memo, sealArgs, line, options, summary, perModel];
 }
 
 void pinTypeOnlySurface;

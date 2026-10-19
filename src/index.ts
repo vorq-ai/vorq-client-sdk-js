@@ -9,8 +9,8 @@
 export { Client, mintSessionToken } from "./client.js";
 export type {
   Allowlist, AllowlistEntry, Ask, AskBook, ClientJob, ClientOptions, EscrowKeyAnnouncement,
-  EvmJob, Floor, FloorBook, JobBook, JobQuery, JobsSummary, JobsSummaryModel, PagedListing, SlaWindow,
-  ProviderRecord, SealedLine, SealLineArgs, SubmitArgs, VorqFile,
+  EvmJob, JobBook, JobQuery, JobsSummary, JobsSummaryModel, PagedListing,
+  ProviderRecord, SealedLine, SealLineArgs, SealMemo, SubmitArgs, VorqFile,
 } from "./client.js";
 
 // The rest of what a public `Client` member hands back or takes. Without these

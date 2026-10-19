@@ -35,7 +35,7 @@ An OpenAI-shaped model object plus a `vorq` block:
 | `id` | `string` | The model name you pass to `submit`. |
 | `object` | `string` | `"model"`. |
 | `owned_by` | `string` | |
-| `vorq.model_id` | `string \| number` | The on-chain integer id. `asks`, `floors` and `jobs` filter by it: `Number(model.vorq.model_id)`. |
+| `vorq.model_id` | `string \| number` | The on-chain integer id. `asks` and `jobs` filter by it: `Number(model.vorq.model_id)`. |
 | `vorq.enabled` | `boolean` | |
 | `vorq.family` | `string` | |
 | `vorq.params_schema` | `unknown` | The published input schema (JSON Schema subset). |

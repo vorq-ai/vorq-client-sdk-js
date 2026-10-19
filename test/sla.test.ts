@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   batchPollInterval,
-  knownWindowSeconds,
   normalizeSla,
   pollInterval,
   slaSeconds,
@@ -94,21 +93,5 @@ describe("windowFromSeconds", () => {
     for (const bad of [null, undefined, 0, -1, "abc", {}]) {
       expect(windowFromSeconds(bad)).toBeNull();
     }
-  });
-});
-
-describe("knownWindowSeconds", () => {
-  it("resolves the tier names and their raw windows to seconds", () => {
-    expect(knownWindowSeconds("async")).toBe(3600);
-    expect(knownWindowSeconds("batch")).toBe(86400);
-    expect(knownWindowSeconds("1h")).toBe(3600);
-    expect(knownWindowSeconds("24h")).toBe(86400);
-  });
-
-  it("answers null, never the one-hour fallback, for anything else", () => {
-    expect(knownWindowSeconds("batc")).toBeNull();
-    expect(knownWindowSeconds("2h")).toBeNull();
-    expect(knownWindowSeconds("")).toBeNull();
-    expect(knownWindowSeconds("toString")).toBeNull();
   });
 });

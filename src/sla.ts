@@ -112,17 +112,3 @@ export function windowFromSeconds(seconds: unknown): string | null {
   // `WaitTimeout` on every job running normally on a non-standard window.
   return Object.hasOwn(SECONDS_WINDOW, parsed) ? SECONDS_WINDOW[parsed]! : `${parsed}s`;
 }
-
-/**
- * The seconds of a window the ask book prices — a tier name (`"async"`,
- * `"batch"`) or its raw window (`"1h"`, `"24h"`) — or `null` for anything
- * else. No one-hour fallback here, unlike `slaSeconds`: this feeds a floors
- * filter, and a typo priced as the 1 h window is the wrong order signed.
- */
-export function knownWindowSeconds(value: string): number | null {
-  const window = normalizeSla(value);
-  for (const [seconds, name] of Object.entries(SECONDS_WINDOW)) {
-    if (name === window) return Number(seconds);
-  }
-  return null;
-}

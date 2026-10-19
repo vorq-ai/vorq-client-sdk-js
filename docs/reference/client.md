@@ -43,7 +43,7 @@ unauthenticated reads (models, chain and market data).
 | `batches` | [Batches](./batches.md). |
 | `submit(args)` | Submit a job. See [Submit](./submit.md). |
 | `job(jobId)` | A `JobHandle` for a stored id, no network call. See [Jobs and results](./jobs-and-results.md). |
-| `chainContext()`, `asks()`, `floors()`, `jobs()`, `jobsSummary()`, `evmJob()`, `providers()`, `allowlist()`, `escrowKey()` | See [Chain and market reads](./chain-and-market.md). |
+| `chainContext()`, `asks()`, `jobs()`, `jobsSummary()`, `evmJob()`, `providers()`, `allowlist()`, `escrowKey()` | See [Chain and market reads](./chain-and-market.md). |
 | `uploadFile()`, `file()`, `fileContent()` | See [Files](#files). |
 | `fetchBlob(cid)` | See [Reading result bytes](#reading-result-bytes). |
 | `json()`, `request()` | See [Low-level requests](#low-level-requests). |

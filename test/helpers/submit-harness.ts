@@ -195,7 +195,7 @@ export const baseRoutes = (providerBoxKey: string | null = RECIPIENT_PUBLIC): Ro
   [/\/auth\/session/, () => json({ token: "t", expires_at: 4102444800 })],
   [/\/evm\/chain/, () => json(CHAIN)],
   [/\/v1\/models/, () => json(MODELS)],
-  [/\/evm\/providers\/\d+/, () => json({ id: 1, box_key: providerBoxKey })],
+  [/\/evm\/providers\/\d+/, () => json({ id: 1, name: null, box_key: providerBoxKey })],
   marketRoute(),
 ];
 
@@ -341,9 +341,12 @@ export interface BatchHarnessOptions {
   batch?: Record<string, unknown>;
   /**
    * What a plan (`POST /v1/batches` with no file) allots per entry: a list, or
-   * a function of the entry. Unset: provider 1 takes every line of an entry
-   * that names no ceiling at "0.001"/"0.002", and nobody is within an entry
-   * that names one, so those lines rest at their own terms.
+   * a function of the entry. Unset, an entry restricted by `providers` is
+   * taken whole by the cheapest listed provider whose `marketCandidate` ask is
+   * within its ceilings (the lowest id, since asks scale with it), and by
+   * nobody when none is; an unrestricted entry is taken whole by provider 1
+   * when it names no ceiling, and by nobody when it names one, so those lines
+   * rest at their own terms.
    */
   allocation?: unknown[] | ((entry: Record<string, unknown>) => unknown[]);
   /**
@@ -376,6 +379,20 @@ export interface BatchHarnessOptions {
    * batch path. The harness still owns the base URL, signer, cipher and fetch.
    */
   clientOptions?: Partial<ConstructorParameters<typeof Client>[0]>;
+}
+
+/** The harness's plan for one entry when the test names none; see `allocation` above. */
+function defaultAllocation(m: Record<string, unknown> & { lines: number }): unknown[] {
+  if (Object.hasOwn(m, "providers")) {
+    const id = (m.providers as number[])
+      .slice()
+      .sort((a, b) => a - b)
+      .find((p) => withinCeilings(marketCandidate(p), m));
+    return id === undefined ? [] : [{ ...marketCandidate(id), lines: m.lines }];
+  }
+  return Object.hasOwn(m, "max_rate_in") || Object.hasOwn(m, "max_rate_out")
+    ? []
+    : [{ ...marketCandidate(1), lines: m.lines }];
 }
 
 export function batchHarness(options: BatchHarnessOptions = {}) {
@@ -447,10 +464,7 @@ export function batchHarness(options: BatchHarnessOptions = {}) {
                 allocation:
                   typeof options.allocation === "function"
                     ? options.allocation(m)
-                    : (options.allocation ??
-                      (Object.hasOwn(m, "max_rate_in") || Object.hasOwn(m, "max_rate_out")
-                        ? []
-                        : [{ ...marketCandidate(1), lines: m.lines }])),
+                    : (options.allocation ?? defaultAllocation(m)),
               })),
             },
             402,

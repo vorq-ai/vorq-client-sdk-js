@@ -14,6 +14,29 @@ Semver, with two points spelled out:
 
 Prereleases are published under the `next` dist-tag.
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking:** `batches.submit`'s `providers` is an allow-list, and the options are optional.
+  Lines are planned only onto the listed providers, cheapest first; `provider` in a line's body
+  restricts that line to exactly that provider and overrides the list. A restricted line never
+  rests: if any cannot be placed, the whole batch raises `ValidationError` before anything is
+  signed. `{ providers: [] }` is refused; an unrestricted line the plan cannot place rests as an
+  open order, which needs a `verifier`. Resting lines are no longer spread round-robin.
+
+### Added
+
+- `SealLineArgs.memo` (`SealMemo`): a batch reads each distinct provider's registry record and
+  each model's id once per submit, not once per line.
+- `ProviderRecord.name`: the provider's curated display name, or `null`.
+
+### Removed
+
+- **Breaking:** `client.floors()` and the `Floor`, `FloorBook` and `SlaWindow` types. The
+  coordinator no longer serves `GET /evm/asks/floors`; `submit` and `batches.submit` price
+  orders from the market themselves, and `client.asks()` lists each provider's rates.
+
 ## [0.1.0-rc.3] — 2026-10-07
 
 ### Changed

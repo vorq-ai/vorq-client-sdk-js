@@ -50,11 +50,11 @@ import {
   type TextResult,
 } from "./results.js";
 import { formatUsd, isUsd, parseUsd } from "./money.js";
-import { parseCeiling } from "./terms.js";
+import { UINT32_MAX, parseCeiling } from "./terms.js";
 import { asBigInt } from "./scalars.js";
 import { declareUnits } from "./units.js";
 import { batchPollInterval, normalizeSla, slaSeconds } from "./sla.js";
-import type { SealLineArgs, SealedLine, VorqFile } from "./client.js";
+import type { SealLineArgs, SealMemo, SealedLine, VorqFile } from "./client.js";
 import type { Models } from "./models.js";
 import type { Cipher, Signer } from "./signer/types.js";
 import type { ChainContext } from "./terms.js";
@@ -167,17 +167,65 @@ function endpointOf(line: Record<string, unknown>, n: number): string {
 }
 
 /**
- * Round-robin across the designated providers, or `undefined` for an open
- * order sealed to the escrow key — `_batches.py:272`'s `_provider_for` exactly,
- * which answers `None` on an empty list.
+ * A provider id: a positive JSON integer within the order's `uint32`.
  *
- * The empty case is spelled out rather than left to fall out of the arithmetic.
- * `index % 0` is `NaN` and `providers[NaN]` is `undefined`, so the old
- * `as number` cast produced the right value by accident while telling every
- * reader and the type checker that it could not happen.
+ * `0` is the contract's sentinel for "any provider", so it is refused rather
+ * than read as an id: an unrestricted line is one that names no provider, not
+ * one that names zero.
  */
-const providerFor = (providers: number[], index: number): number | undefined =>
-  providers.length === 0 ? undefined : (providers[index % providers.length] as number);
+function providerIdOf(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0 || value > UINT32_MAX) {
+    throw new ValidationError(
+      `${field} must be a provider id, an integer in [1, ${UINT32_MAX}], got ${JSON.stringify(value)}`,
+      { type: "invalid_request_error" },
+    );
+  }
+  return value;
+}
+
+/**
+ * The batch's allow-list, ascending, or `undefined` for none: a non-empty list
+ * of unique provider ids. `null` means unset, as it does for a line's own
+ * `provider`.
+ */
+function allowListOf(value: unknown): number[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new ValidationError(
+      `providers must be a non-empty list of provider ids, got ${JSON.stringify(value)}`,
+      { type: "invalid_request_error" },
+    );
+  }
+  const ids = new Set<number>();
+  for (const [k, entry] of value.entries()) {
+    const id = providerIdOf(entry, `providers[${k}]`);
+    if (ids.has(id)) {
+      throw new ValidationError(`providers names provider ${id} twice`, {
+        type: "invalid_request_error",
+      });
+    }
+    ids.add(id);
+  }
+  return [...ids].sort((a, b) => a - b);
+}
+
+/** `provider 7`, or `providers 3, 7`: how a refusal names an allowed set. */
+const providersNamed = (ids: number[]): string =>
+  `${ids.length === 1 ? "provider" : "providers"} ${ids.join(", ")}`;
+
+/**
+ * Read once per key for the life of `memo`: the second ask for a key gets the
+ * first ask's promise. A batch keeps one per submit, so a provider's registry
+ * record and a model's id are each one read however many lines name them.
+ */
+export function once<K, V>(memo: Map<K, Promise<V>>, key: K, read: () => Promise<V>): Promise<V> {
+  let value = memo.get(key);
+  if (value === undefined) {
+    value = read();
+    memo.set(key, value);
+  }
+  return value;
+}
 
 /**
  * One line's model-owned input: its body without the routing keys.
@@ -185,21 +233,22 @@ const providerFor = (providers: number[], index: number): number | undefined =>
  * A fresh object every time rather than a `delete` over the caller's own body:
  * `submit` is handed the caller's array and must give it back unchanged.
  */
-const ROUTING_KEYS = new Set(["model", "max_rate_in", "max_rate_out", "units_out"]);
+const ROUTING_KEYS = new Set(["model", "max_rate_in", "max_rate_out", "units_out", "provider"]);
 const inputOf = (body: Record<string, unknown>): Record<string, unknown> =>
   Object.fromEntries(Object.entries(body).filter(([k]) => !ROUTING_KEYS.has(k)));
 
 export interface BatchSubmitOptions {
   /**
-   * The providers this batch is spread across, round-robin.
-   *
-   * An **empty list is an open batch**: every line is sealed to the
-   * coordinator's verified escrow key instead of to a named operator. That
-   * needs a client built with `verifier`, and is refused without one — which is
-   * why this member is required rather than optional, so the empty case is
-   * written on purpose.
+   * An **allow-list**: every line that names no `provider` of its own is
+   * planned only onto these providers, cheapest first, and sealed to the one it
+   * lands on. Non-empty, unique ids. A restricted line never rests: one the
+   * listed providers cannot take refuses the whole batch before anything is
+   * signed. Without a list a line goes where the plan puts it, and one the plan
+   * cannot place rests as an **open order**, sealed to the coordinator's
+   * verified escrow key — which needs a client built with `verifier`, and is
+   * refused without one.
    */
-  providers: number[];
+  providers?: number[];
   /** At most 16 pairs, 64-character keys, 512-character string values. */
   metadata?: Record<string, string>;
   /** Check each distinct model's input against its schema first. Default `true`. */
@@ -222,21 +271,18 @@ export class Batches {
    * to its provider. A line the plan cannot place **rests** at its ceilings, a
    * side with no ceiling at the market rate.
    *
-   * `providers` is how the resting lines spread. Given a list, they are designated
-   * round-robin across it — one batch running across several operators, each
-   * able to open only its own lines. Given an **empty** list, each is an
-   * open order: sealed to the coordinator's verified escrow key and claimable
-   * by any provider that clears the terms, which spreads further than a fixed
-   * list can. That path requires a client built
-   * with `verifier`, exactly as a single open `submit` does — an escrow key
-   * that cannot be checked is not one this SDK will seal to.
-   *
-   * **Deliberate divergence, in the spelling only.** Python's `providers` is
-   * optional and defaults to `None` (`_batches.py:87`), so omitting it opens the
-   * batch; here it is **required**, so the open case has to be written as
-   * `{ providers: [] }`. The same two behaviours, one of them harder to reach
-   * by accident: an open batch rests its money on a key the caller should have
-   * meant to verify.
+   * `options.providers` restricts every line to those providers, and a line's
+   * `provider` (in its body, beside the ceilings) restricts that line to exactly
+   * that one, overriding the list. A restricted line is planned only onto its
+   * allowed providers and **never rests**: if they cannot take it — their asks
+   * do not clear its ceilings, or they lack the capacity — the whole batch is
+   * refused before anything is sealed or signed, naming the model, how many
+   * lines could not be placed and the providers allowed. An unrestricted line
+   * the plan cannot place rests as an **open order**: sealed to the
+   * coordinator's verified escrow key and claimable by any provider that clears
+   * the terms. That path requires a client built with `verifier`, exactly as a
+   * single open `submit` does — an escrow key that cannot be checked is not one
+   * this SDK will seal to.
    *
    * `custom_id` is optional (1–64 characters, unique within the batch) and
    * **travels sealed inside its line's container**, coming back inside the
@@ -251,7 +297,7 @@ export class Batches {
   async submit(
     requests: Record<string, unknown>[] | string,
     completionWindow = "24h",
-    options: BatchSubmitOptions,
+    options: BatchSubmitOptions = {},
   ): Promise<BatchHandle> {
     const window = normalizeSla(completionWindow);
     if (!WINDOWS.includes(window)) {
@@ -272,19 +318,13 @@ export class Batches {
         { type: "invalid_request_error" },
       );
     }
-    // Normalised **once**, rather than an optional chain at one of the three
-    // reads and a bare property access at the other two. The type makes
-    // `options` required, but a plain-JS caller writing `submit(lines)` should
-    // meet the `providers` refusal below — which names the remedy — rather than
-    // a `TypeError` about reading a property of undefined. Doing that at only
-    // the first read leaves a reader to prove the other two are unreachable.
-    const opts = (options ?? { providers: [] }) as unknown as Record<string, unknown>;
+    const opts = options as Record<string, unknown>;
     // Own properties only on the options object too — it is the caller's, and
     // `providers` decides **who each line is sealed to**. A polluted
-    // `Object.prototype.providers` would designate a batch the caller submitted
-    // open, or vice versa: a change of who can read the payload, from a key
-    // nobody passed (`own.ts`).
-    const providers = (own(opts, "providers") as number[] | undefined) ?? [];
+    // `Object.prototype.providers` would restrict a batch the caller submitted
+    // open: a change of who can read the payload, from a key nobody passed
+    // (`own.ts`).
+    const batchList = allowListOf(own(opts, "providers"));
     const lines = loadRequests(requests);
     if (lines.length === 0) {
       throw new ValidationError("the batch contains no requests", {
@@ -298,6 +338,8 @@ export class Batches {
     const seen = new Set<string>();
     const byModel = new Map<string, number[]>();
     const endpoints = new Set<string>();
+    /** Each line's allowed providers: its own `provider`, else the batch's list, else none. */
+    const allowed: (number[] | undefined)[] = [];
     lines.forEach((line, i) => {
       const n = i + 1;
       // A JSONL `null`, a bare array, a number: `loadRequests` promises that a
@@ -353,6 +395,10 @@ export class Batches {
       // enforces that ordering — move the refusal and this is a bare read again.
       const model = String(own(body as Record<string, unknown>, "model"));
       byModel.set(model, [...(byModel.get(model) ?? []), i]);
+      const pin = own(body as Record<string, unknown>, "provider");
+      allowed.push(
+        pin === undefined || pin === null ? batchList : [providerIdOf(pin, `line ${n}: provider`)],
+      );
     });
 
     if (endpoints.size > 1) {
@@ -396,23 +442,22 @@ export class Batches {
 
     // -- the plan: who takes each line, at which rates -----------------------
     const ctx = await this.client.chainContext();
-    const picks = await this.plan(lines, window, ctx.decimals);
-    if (
-      providers.length === 0 &&
-      this.client.verifier === null &&
-      picks.some((pick) => pick.provider === undefined)
-    ) {
-      // A line the plan could not place rests, and with no providers to
-      // designate it rests as an open order, sealed to the coordinator's escrow
-      // key. A client built with a verifier can check that key; one built
-      // without cannot, and fails closed here — before a byte is sealed, which
-      // is the whole point of checking it at this door rather than at the first
-      // line's `sealLine`. Same policy as a single open `submit`.
+    /** One read per distinct provider record and model id for the whole submit. */
+    const memo: SealMemo = { records: new Map(), modelIds: new Map() };
+    const picks = await this.plan(lines, allowed, window, ctx.decimals, memo);
+    if (this.client.verifier === null && picks.some((pick) => pick.provider === undefined)) {
+      // An unrestricted line the plan could not place rests as an open order,
+      // sealed to the coordinator's escrow key. A client built with a verifier
+      // can check that key; one built without cannot, and fails closed here —
+      // before a byte is sealed, which is the whole point of checking it at
+      // this door rather than at the first line's `sealLine`. Same policy as a
+      // single open `submit`.
       throw new EscrowKeyUnverified(
-        "no provider is within the ceilings of every line, so some would rest as open " +
-          "orders, which are sealed to the coordinator's escrow key — and this client has " +
-          "no verifier to check that key with. Build the client with `verifier`, or name " +
-          "the providers to designate: batches.submit(lines, window, { providers: [id, …] })",
+        "no provider is within the ceilings of every unrestricted line, so some would rest " +
+          "as open orders, which are sealed to the coordinator's escrow key — and this client " +
+          "has no verifier to check that key with. Build the client with `verifier`, or " +
+          "restrict the lines: batches.submit(lines, window, { providers: [id, …] }), or " +
+          "`provider` on a line's body",
         { type: "invalid_request_error" },
       );
     }
@@ -439,8 +484,8 @@ export class Batches {
           url: endpoint,
           rateIn: pick.rateIn,
           rateOut: pick.rateOut,
-          // Not planned: the line rests, spread across `providers`.
-          provider: pick.provider ?? providerFor(providers, i),
+          // The planned provider, or none: an unrestricted line resting open.
+          provider: pick.provider,
           // **Handed over as it is, never `Number(...)`.** `declareUnits`
           // refuses a `units_out` that is not an integer *by type*, exactly as
           // the authority does, and coercing here would defeat that: `true`
@@ -455,6 +500,7 @@ export class Batches {
               ? (own(line, "custom_id") as string)
               : undefined,
           ctx,
+          memo,
         }),
       );
     }
@@ -519,23 +565,31 @@ export class Batches {
   /**
    * Provider and rates for every line, from the coordinator's plan.
    *
-   * One `POST /v1/batches` with no file: per model and pair of ceilings, the
-   * line count and the summed units. The node answers which providers within
-   * the ceilings take how many lines, never past a provider's on-chain capacity,
-   * and a placed line signs its provider's ask. A line left over rests, with no
-   * provider, at its ceilings; a side with no ceiling rests at the market rate,
-   * read by one more plan that names none. A line with no ceiling at all cannot
-   * rest, so a batch that leaves one over is refused before anything is signed.
+   * One `POST /v1/batches` with no file: per model, pair of ceilings and set of
+   * allowed providers, the line count and the summed units, a restricted entry
+   * naming its set as `providers`. The node answers which providers within the
+   * ceilings take how many lines, never past a provider's on-chain capacity,
+   * and only ever allowed ones for a restricted entry; a placed line signs its
+   * provider's ask.
+   *
+   * A restricted line left over refuses the batch: it never rests. An
+   * unrestricted one rests open at its ceilings; a side with no ceiling rests
+   * at the market rate, read by one more plan that names none. An unrestricted
+   * line with no ceiling at all cannot rest, so a batch that leaves one over is
+   * refused too. Every refusal lands before anything is signed.
    */
   private async plan(
     lines: Record<string, unknown>[],
+    allowed: (number[] | undefined)[],
     window: string,
     decimals: number,
+    memo: SealMemo,
   ): Promise<{ provider: number | undefined; rateIn: string; rateOut: string }[]> {
     interface Group {
       model: string;
       maxIn: bigint | null;
       maxOut: bigint | null;
+      allowed: number[] | undefined;
       indexes: number[];
       unitsIn: number;
       unitsOut: number;
@@ -552,8 +606,21 @@ export class Batches {
       const model = String(own(body, "model"));
       const maxIn = parseCeiling(own(body, "max_rate_in"), `line ${i + 1}: max_rate_in`, decimals);
       const maxOut = parseCeiling(own(body, "max_rate_out"), `line ${i + 1}: max_rate_out`, decimals);
-      const key = JSON.stringify([model, maxIn?.toString() ?? null, maxOut?.toString() ?? null]);
-      const group = groups.get(key) ?? { model, maxIn, maxOut, indexes: [], unitsIn: 0, unitsOut: 0 };
+      const key = JSON.stringify([
+        model,
+        maxIn?.toString() ?? null,
+        maxOut?.toString() ?? null,
+        allowed[i] ?? null,
+      ]);
+      const group = groups.get(key) ?? {
+        model,
+        maxIn,
+        maxOut,
+        allowed: allowed[i],
+        indexes: [],
+        unitsIn: 0,
+        unitsOut: 0,
+      };
       const unitsOut = own(body, "units_out");
       const declared = declareUnits(
         inputOf(body),
@@ -574,7 +641,9 @@ export class Batches {
         completion_window: window,
         models: await Promise.all(
           entries.map(async ({ group, lines: count }) => ({
-            model_id: await this.client.modelIdFor(group.model),
+            model_id: await once(memo.modelIds, group.model, () =>
+              this.client.modelIdFor(group.model),
+            ),
             lines: count,
             units_in: group.unitsIn,
             units_out: group.unitsOut,
@@ -584,6 +653,7 @@ export class Batches {
             ...(ceilings && group.maxOut !== null
               ? { max_rate_out: formatUsd(group.maxOut, decimals) }
               : {}),
+            ...(group.allowed === undefined ? {} : { providers: group.allowed }),
           })),
         ),
       };
@@ -608,7 +678,8 @@ export class Batches {
           { type: "api_error", statusCode: response.status },
         );
       }
-      return (plan as unknown[]).map((entry) => {
+      return (plan as unknown[]).map((entry, k) => {
+        const permitted = entries[k]!.group.allowed;
         const allocation =
           typeof entry === "object" && entry !== null
             ? own(entry as Record<string, unknown>, "allocation")
@@ -633,6 +704,12 @@ export class Batches {
               type: "api_error",
               statusCode: 402,
             });
+          }
+          if (permitted !== undefined && !permitted.some((id) => BigInt(id) === pid)) {
+            throw new VorqError(
+              `the node planned provider ${pid} for lines restricted to ${providersNamed(permitted)}`,
+              { type: "api_error", statusCode: 402 },
+            );
           }
           try {
             return {
@@ -679,6 +756,19 @@ export class Batches {
       if (placed < group.indexes.length) left.set(group, group.indexes.slice(placed));
     }
 
+    // -- a restricted line never rests: one left over refuses the batch
+    for (const [group, indexes] of left) {
+      if (group.allowed === undefined) continue;
+      throw new ValidationError(
+        `${indexes.length} of the ${group.indexes.length} ${group.model} lines restricted to ` +
+          `${providersNamed(group.allowed)} cannot be placed in the ${window} window: their ` +
+          "asks do not clear the lines' ceilings or they lack the capacity, and a restricted " +
+          "line never rests, so nothing was signed. Raise the ceilings, allow more providers, " +
+          "or try the other window",
+        { type: "invalid_request_error" },
+      );
+    }
+
     const refuse = (group: Group): ValidationError =>
       new ValidationError(
         `the network can take ${group.indexes.length - left.get(group)!.length} of the ` +
@@ -688,7 +778,8 @@ export class Batches {
         { type: "invalid_request_error" },
       );
 
-    // -- the lines that rest: at their ceilings, the market rate where there is none
+    // -- the unrestricted lines that rest open: at their ceilings, the market
+    // rate where there is none
     for (const group of left.keys()) {
       if (group.maxIn === null && group.maxOut === null) throw refuse(group);
     }

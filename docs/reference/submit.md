@@ -208,5 +208,7 @@ client.payLine(line: SealedLine, gasFee: bigint, ctx: ChainContext, feeBps: bigi
 
 The two halves `batches.submit` is built from, public for callers assembling a batch file by
 hand. `sealLine` seals one payload and signs its order; `payLine` signs the payment for it
-(`cap + floor(cap × feeBps / 10000) + gasFee`) and returns the flat JSONL row. Prefer `submit`
-for a job and `batches.submit` for a file.
+(`cap + floor(cap × feeBps / 10000) + gasFee`) and returns the flat JSONL row. Pass the same
+`args.memo` (`{ records: new Map(), modelIds: new Map() }`) to every `sealLine` of one file and
+each provider's registry record and each model's id is read once. Prefer `submit` for a job and
+`batches.submit` for a file.

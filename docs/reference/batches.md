@@ -7,7 +7,7 @@ description: client.batches — submit, get and list, and the BatchHandle a batc
 client.batches.submit(
   requests: Record<string, unknown>[] | string,
   completionWindow?: string,        // default "24h"
-  options: BatchSubmitOptions,      // required
+  options?: BatchSubmitOptions,
 ): Promise<BatchHandle>
 
 client.batches.get(batchId: string): BatchHandle       // no network call
@@ -31,19 +31,29 @@ id.
 | `body.model` | yes | The model id. |
 | `body.max_rate_in`, `body.max_rate_out` | no | The line's ceilings, as `maxRateIn` / `maxRateOut` on `submit`. Each is optional. |
 | `body.units_out` | no | The output unit count, as `unitsOut` on `submit`. |
+| `body.provider` | no | A provider id (an integer from 1 to 4294967295): the line is planned onto that provider only. Overrides `providers` in the options. |
 | rest of `body` | | The model input. |
 
 Other line members (such as `method`) are ignored.
 
-**Every line is planned.** Before sealing, one `POST /v1/batches` with no file sends, per model
-and pair of ceilings, the line count and summed units. The coordinator answers which providers
-within the ceilings take how many lines at which ask; no provider gets more than its on-chain
-capacity leaves free. Each planned line signs its provider's ask and is pinned to it.
+**Every line is planned.** Before sealing, one `POST /v1/batches` with no file sends, per model,
+pair of ceilings and set of allowed providers, the line count and summed units; a restricted
+entry names its set as `providers`. The coordinator answers which providers within the ceilings
+take how many lines at which ask, cheapest first, and plans a restricted entry onto its allowed
+providers only; no provider gets more than its on-chain capacity leaves free. Each planned line
+signs its provider's ask and is designated to it.
 
-A line the plan cannot place **rests** at its ceilings, spread by `providers`. A side with no
-ceiling rests at the market rate, the cheapest live ask's, read by one more plan. If lines with
-no ceiling at all do not all fit in the window, or there is no live ask to take a market rate
-from, `ValidationError` is raised and nothing is signed.
+A **restricted** line (`providers` in the options, or `body.provider`) never rests. If the plan
+leaves any over, because the allowed providers' asks do not clear the ceilings or they lack the
+capacity, the whole batch raises `ValidationError` before anything is sealed or signed, naming
+the model, how many lines could not be placed and the allowed providers.
+
+An **unrestricted** line the plan cannot place **rests** at its ceilings as an **open order**
+sealed to the verified escrow key, which needs a client built with a `verifier` (else
+`EscrowKeyUnverified`, before anything is sealed). A side with no ceiling rests at the market
+rate, the cheapest live ask's, read by one more plan. If lines with no ceiling at all do not all
+fit in the window, or there is no live ask to take a market rate from, `ValidationError` is
+raised and nothing is signed.
 
 **`completionWindow`** is `"1h"` or `"24h"`, or `"async"` / `"batch"`. Anything else raises
 `ValidationError`. A `"24h"` batch usually takes minutes to a few hours; 24 hours is the maximum.
@@ -52,7 +62,7 @@ from, `ValidationError` is raised and nothing is signed.
 
 | Member | Type | Meaning |
 | --- | --- | --- |
-| `providers` | `number[]` | **Required.** Resting lines are designated round-robin across the list; planned lines ignore it. An empty array makes every resting line an **open order** sealed to the verified escrow key, which needs a client built with a `verifier` (else `EscrowKeyUnverified`, before anything is sealed). |
+| `providers` | `number[]` | Optional. An allow-list for every line without its own `body.provider`: those lines are planned only onto these providers, cheapest first. Non-empty, unique, each an integer from 1 to 4294967295. |
 | `metadata` | `Record<string, string>` | Optional. At most 16 pairs, 64-character keys, 512-character values. **Stored in plaintext** on the batch record. |
 | `validateParams` | `boolean` | Default `true`. Validates each line's input against its model's schema, as on [`submit`](./submit.md#local-validation). |
 
@@ -62,8 +72,10 @@ Batch lines are never `confidential`.
 
 Raised before anything is uploaded (`ValidationError` unless noted): a client without `signer`
 and `cipher`; an invalid window; an empty batch; a line that is not valid JSON, not an object, or
-has no `body.model`; an invalid or duplicate `custom_id`; an unknown `url`, or more than one; a
-param the model's schema refuses; an open batch without a verifier (`EscrowKeyUnverified`).
+has no `body.model`; an invalid or duplicate `custom_id`; a `body.provider` that is not an
+integer from 1 to 4294967295; a `providers` that is empty, repeats an id, or holds anything but
+such integers; an unknown `url`, or more than one; a param the model's schema refuses; a
+restricted line the plan cannot place; an open line without a verifier (`EscrowKeyUnverified`).
 
 ## `BatchHandle`
 

@@ -107,7 +107,7 @@ client.payLine = async (line, gasFee, ctx, feeBps) => {
 };
 
 const t0 = Date.now();
-const handle = await client.batches.submit(lines, window, { providers: unpriced ? [] : [provider] });
+const handle = await client.batches.submit(lines, window, unpriced ? {} : { providers: [provider] });
 console.log("batch     :", handle.id, `${handle.jobIds.length} lines`);
 console.log("job ids   :", handle.jobIds.join(", "));
 for (const { row } of sentRows) {

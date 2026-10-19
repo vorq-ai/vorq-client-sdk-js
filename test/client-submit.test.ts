@@ -456,7 +456,7 @@ describe("model id", () => {
         [/\/auth\/session/, () => json({ token: "t", expires_at: 4102444800 })],
         [/\/evm\/chain/, () => json(CHAIN)],
         [/\/v1\/models/, () => json({ data: [{ id: "m", object: "model", vorq }] })],
-        [/\/evm\/providers\/\d+/, () => json({ id: 1, box_key: RECIPIENT_PUBLIC })],
+        [/\/evm\/providers\/\d+/, () => json({ id: 1, name: null, box_key: RECIPIENT_PUBLIC })],
         [/\/v1\/jobs$/, () => json({}, 500)],
       ]);
       await expect(c.submit({ model: "m", input: "hi", provider: 1 })).rejects.toThrow(
@@ -1078,7 +1078,7 @@ describe("the two-request exchange", () => {
       ],
       [/\/evm\/chain/, () => json(CHAIN)],
       [/\/v1\/models/, () => json(MODELS)],
-      [/\/evm\/providers\/\d+/, () => json({ id: 1, box_key: RECIPIENT_PUBLIC })],
+      [/\/evm\/providers\/\d+/, () => json({ id: 1, name: null, box_key: RECIPIENT_PUBLIC })],
       marketRoute(),
       jobsRoute([
         () => json({ error: { message: "expired" } }, 401),
@@ -1443,7 +1443,7 @@ describe("param checking on the way in", () => {
       /\/v1\/models/,
       () => json({ data: [{ id: "m", object: "model", vorq: { model_id: 7, params_schema: schema } }] }),
     ],
-    [/\/evm\/providers\/\d+/, () => json({ id: 1, box_key: RECIPIENT_PUBLIC })],
+    [/\/evm\/providers\/\d+/, () => json({ id: 1, name: null, box_key: RECIPIENT_PUBLIC })],
   ];
 
   const SCHEMA = { type: "object", properties: { temperature: { type: "number" } } };
@@ -1520,7 +1520,7 @@ describe("param checking on the way in", () => {
       [/\/evm\/chain/, () => json(CHAIN)],
       // First read (the schema lookup) fails; the model-id resolution re-reads.
       [/\/v1\/models/, (n) => (n === 1 ? json({ error: { message: "boom" } }, 500) : json(MODELS))],
-      [/\/evm\/providers\/\d+/, () => json({ id: 1, box_key: RECIPIENT_PUBLIC })],
+      [/\/evm\/providers\/\d+/, () => json({ id: 1, name: null, box_key: RECIPIENT_PUBLIC })],
       marketRoute(),
       [
         /\/v1\/jobs$/,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { Address } from "viem";
 
 import { INLINE_MAX_BYTES } from "../src/crypto/domains.js";
@@ -37,6 +37,22 @@ import {
  */
 const PRICED = { model: "m", max_rate_in: "1", max_rate_out: "2" };
 
+/**
+ * A plan placing every line on provider 1 at `PRICED`'s own ceilings, so the
+ * cap arithmetic the pricing tests write out is over rates 1 and 2.
+ */
+const AT_CEILINGS = (entry: Record<string, unknown>) => [
+  { provider_id: 1, box_key: RECIPIENT_PUBLIC, rate_in: "1", rate_out: "2", lines: entry.lines },
+];
+
+/** A verifier that accepts the harness's escrow announcement, for open lines. */
+const mockVerifier = () =>
+  new Verifier("http://chain", {
+    mode: "mock",
+    wallClock: () => NOW,
+    fetch: scriptedNode({ entries: () => ESCROW_ACTIVE }).fetch,
+  });
+
 /** A hostile payee a node might name in its quote. A valid address. */
 const HOSTILE_TO = "0xdeadbeef".padEnd(42, "0") as Address;
 
@@ -64,11 +80,10 @@ describe("Batches.submit — refusals before anything is sealed", () => {
         { provider_id: 8, box_key: RECIPIENT_PUBLIC, rate_in: "6", rate_out: "9", lines: 1 },
       ],
     });
-    // No verifier and no providers: unpriced lines are never open orders.
+    // No verifier and no pin: unpriced lines are never open orders.
     await h.client.batches.submit(
       [{ body: { model: "m" } }, { body: { model: "m" } }, { body: { model: "m" } }],
       "24h",
-      { providers: [] },
     );
     expect(h.plans).toHaveLength(1);
     expect(h.plans[0]!.completion_window).toBe("24h");
@@ -91,21 +106,28 @@ describe("Batches.submit — refusals before anything is sealed", () => {
       { provider_id: 7, box_key: RECIPIENT_PUBLIC, rate_in: "5", rate_out: "9", lines: 1 },
       { provider_id: 8, box_key: RECIPIENT_PUBLIC, rate_in: "6", rate_out: "9", lines: 1 },
     ];
-    // Nobody is within the priced line's ceilings, so it rests on provider 9.
+    // Nobody is within the priced line's ceilings, so it rests open at them;
+    // the unpriced lines around it are planned normally.
     const h = batchHarness({
       gasFee: 7n,
       allocation: (entry) => ("max_rate_in" in entry ? [] : taken),
+      escrowAnnouncement: () => announcement({ key: RECIPIENT_PUBLIC }),
+      clientOptions: { verifier: mockVerifier() },
     });
     await h.client.batches.submit(
       [{ body: { model: "m" } }, { body: PRICED }, { body: { model: "m" } }],
       "24h",
-      { providers: [9] },
     );
-    expect((h.plans[0]!.models as { lines: number }[]).map((m) => m.lines)).toEqual([2, 1]);
+    expect(
+      (h.plans[0]!.models as Record<string, unknown>[]).map((m) => [m.lines, m.providers]),
+    ).toEqual([
+      [2, undefined],
+      [1, undefined],
+    ]);
     const rows = manifestRows(h.uploads[0]!);
     expect(rows.map((r) => [r.designated, r.rate_in])).toEqual([
       [7, "5"],
-      [9, PRICED.max_rate_in],
+      [0, PRICED.max_rate_in],
       [8, "6"],
     ]);
   });
@@ -117,9 +139,7 @@ describe("Batches.submit — refusals before anything is sealed", () => {
       ],
     });
     await expect(
-      h.client.batches.submit([{ body: { model: "m" } }, { body: { model: "m" } }], "24h", {
-        providers: [],
-      }),
+      h.client.batches.submit([{ body: { model: "m" } }, { body: { model: "m" } }], "24h"),
     ).rejects.toThrow(/can take 1 of the 2 m lines without both ceilings in the 24h window/);
     expect(h.termsOnlyPosts).toHaveLength(0);
     expect(h.uploads).toHaveLength(0);
@@ -130,7 +150,7 @@ describe("Batches.submit — refusals before anything is sealed", () => {
       gasFee: 7n,
       allocation: (entry) => [{ ...marketCandidate(4), lines: entry.lines }],
     });
-    await h.client.batches.submit([{ body: PRICED }], "1h", { providers: [9] });
+    await h.client.batches.submit([{ body: PRICED }], "1h");
     expect(h.plans).toHaveLength(1);
     expect(h.plans[0]!.models).toMatchObject([{ lines: 1, max_rate_in: "1", max_rate_out: "2" }]);
     const [row] = manifestRows(h.uploads[0]!);
@@ -139,27 +159,133 @@ describe("Batches.submit — refusals before anything is sealed", () => {
 
   it("rests a line with one ceiling at it and the market rate on the other side", async () => {
     // Nobody is within the input ceiling; a second plan, naming none, supplies
-    // the rate for the side the line left open.
+    // the rate for the side the line left open. The line is open, so it needs
+    // a verifier to rest.
     const h = batchHarness({
       gasFee: 7n,
       allocation: (entry) => ("max_rate_in" in entry ? [] : [{ ...marketCandidate(4), lines: 1 }]),
+      escrowAnnouncement: () => announcement({ key: RECIPIENT_PUBLIC }),
+      clientOptions: { verifier: mockVerifier() },
     });
-    await h.client.batches.submit([{ body: { model: "m", max_rate_in: "0.0005" } }], "1h", {
-      providers: [9],
-    });
+    await h.client.batches.submit([{ body: { model: "m", max_rate_in: "0.0005" } }], "1h");
     expect(h.plans).toHaveLength(2);
     expect(h.plans[0]!.models).toMatchObject([{ max_rate_in: "0.0005" }]);
     expect(h.plans[1]!.models).not.toMatchObject([{ max_rate_in: expect.anything() }]);
     const [row] = manifestRows(h.uploads[0]!);
-    expect([row!.designated, row!.rate_in, row!.rate_out]).toEqual([9, "0.0005", "0.008"]);
+    expect([row!.designated, row!.rate_in, row!.rate_out]).toEqual([0, "0.0005", "0.008"]);
+  });
+
+  it("refuses a restricted line its providers' asks do not clear, with no market re-plan", async () => {
+    // Provider 9 asks 0.009 on input, above the line's 0.0005: the line cannot
+    // be placed, and a restricted line never rests — not even at its ceiling
+    // with the market rate on the other side, so no second plan is asked.
+    const h = batchHarness({ gasFee: 7n });
+    const sealLine = vi.spyOn(h.client, "sealLine");
+    await expect(
+      h.client.batches.submit([{ body: { model: "m", max_rate_in: "0.0005" } }], "1h", {
+        providers: [9],
+      }),
+    ).rejects.toThrow(
+      /^1 of the 1 m lines restricted to provider 9 cannot be placed in the 1h window: .*nothing was signed/,
+    );
+    expect(h.plans).toHaveLength(1);
+    expect(h.plans[0]!.models).toMatchObject([{ providers: [9], max_rate_in: "0.0005" }]);
+    expect(sealLine).not.toHaveBeenCalled();
+    expect(h.termsOnlyPosts).toHaveLength(0);
+    expect(h.uploads).toHaveLength(0);
+  });
+
+  it("refuses the WHOLE batch when restricted lines are only partly placed", async () => {
+    // The list takes one of its three lines; the line pinned to provider 1
+    // beside them is placed in full. Nothing is sealed, signed or uploaded.
+    const h = batchHarness({
+      gasFee: 7n,
+      allocation: (entry) =>
+        (entry.providers as number[]).includes(1)
+          ? [{ ...marketCandidate(1), lines: entry.lines }]
+          : [{ ...marketCandidate(3), lines: 1 }],
+    });
+    const sealLine = vi.spyOn(h.client, "sealLine");
+    const err = await h.client.batches
+      .submit(
+        [
+          { body: { model: "m", provider: 1 } },
+          { body: { model: "m" } },
+          { body: { model: "m" } },
+          { body: { model: "m" } },
+        ],
+        "24h",
+        { providers: [7, 3] },
+      )
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ValidationError);
+    expect((err as Error).message).toMatch(
+      /^2 of the 3 m lines restricted to providers 3, 7 cannot be placed in the 24h window/,
+    );
+    expect(sealLine).not.toHaveBeenCalled();
+    expect(h.termsOnlyPosts).toHaveLength(0);
+    expect(h.uploads).toHaveLength(0);
+    expect(h.creates).toHaveLength(0);
+  });
+
+  it("refuses a restricted line with no ceiling its providers cannot take, naming them", async () => {
+    const h = batchHarness({ allocation: [] });
+    await expect(
+      h.client.batches.submit([{ body: { model: "m", provider: 9 } }], "24h"),
+    ).rejects.toThrow(/^1 of the 1 m lines restricted to provider 9 cannot be placed/);
+    expect(h.plans[0]!.models).toMatchObject([{ providers: [9] }]);
+    expect(h.termsOnlyPosts).toHaveLength(0);
+    expect(h.uploads).toHaveLength(0);
+  });
+
+  it("refuses a plan that puts a restricted line on a provider outside its list", async () => {
+    const h = batchHarness({ allocation: [{ ...marketCandidate(4), lines: 1 }] });
+    await expect(
+      h.client.batches.submit([{ body: { model: "m" } }], "24h", { providers: [9, 3] }),
+    ).rejects.toThrow(/planned provider 4 for lines restricted to providers 3, 9/);
+    const pinned = batchHarness({ allocation: [{ ...marketCandidate(4), lines: 1 }] });
+    await expect(
+      pinned.client.batches.submit([{ body: { model: "m", provider: 9 } }], "24h", {
+        providers: [4],
+      }),
+    ).rejects.toThrow(/planned provider 4 for lines restricted to provider 9/);
+    expect(h.termsOnlyPosts).toHaveLength(0);
+    expect(h.uploads).toHaveLength(0);
+    expect(pinned.uploads).toHaveLength(0);
+  });
+
+  it("refuses a line provider that is not a provider id, naming the line", async () => {
+    const h = batchHarness();
+    for (const bad of [0, -1, 1.5, "7", true, 2 ** 32]) {
+      await expect(
+        h.client.batches.submit([{ body: PRICED }, { body: { ...PRICED, provider: bad } }], "1h"),
+      ).rejects.toThrow(/line 2: provider must be a provider id, an integer in \[1, 4294967295\]/);
+    }
+    expect(h.calls).toHaveLength(0);
+  });
+
+  it("refuses a providers list that is not non-empty, unique provider ids", async () => {
+    const h = batchHarness();
+    const submit = (providers: unknown) =>
+      h.client.batches.submit([{ body: PRICED }], "1h", { providers } as { providers: number[] });
+    for (const bad of [[], 7, "7", {}]) {
+      await expect(submit(bad)).rejects.toThrow(/^providers must be a non-empty list of provider ids/);
+    }
+    for (const bad of [0, -1, 1.5, "7", true, null, 2 ** 32]) {
+      await expect(submit([3, bad])).rejects.toThrow(
+        /^providers\[1\] must be a provider id, an integer in \[1, 4294967295\]/,
+      );
+    }
+    await expect(submit([3, 7, 3])).rejects.toThrow(/^providers names provider 3 twice/);
+    await expect(submit([3, 7, 3])).rejects.toThrow(ValidationError);
+    // Refused before anything is read, sealed or signed.
+    expect(h.calls).toHaveLength(0);
   });
 
   it("refuses a planned ask above a line's ceiling", async () => {
     const h = batchHarness({ allocation: [{ ...marketCandidate(4), lines: 1 }] });
     await expect(
-      h.client.batches.submit([{ body: { model: "m", max_rate_out: "0.001" } }], "1h", {
-        providers: [9],
-      }),
+      h.client.batches.submit([{ body: { model: "m", max_rate_out: "0.001" } }], "1h"),
     ).rejects.toThrow(/above the ceilings/);
     expect(h.uploads).toHaveLength(0);
   });
@@ -178,12 +304,12 @@ describe("Batches.submit — refusals before anything is sealed", () => {
     // extends `VorqError`, so asserting that would be vacuous. This one says
     // the refusal is the fail-closed escrow-key policy and not, say, the
     // "batch contains no requests" check firing early.
-    await expect(
-      h.client.batches.submit([{ body: PRICED }], "1h", { providers: [] }),
-    ).rejects.toThrow(EscrowKeyUnverified);
-    await expect(
-      h.client.batches.submit([{ body: PRICED }], "1h", { providers: [] }),
-    ).rejects.toThrow(/no verifier to check that key with/);
+    await expect(h.client.batches.submit([{ body: PRICED }], "1h")).rejects.toThrow(
+      EscrowKeyUnverified,
+    );
+    await expect(h.client.batches.submit([{ body: PRICED }], "1h")).rejects.toThrow(
+      /no verifier to check that key with/,
+    );
     // The plan is what says the line rests; nothing is sealed, quoted or uploaded.
     expect(h.termsOnlyPosts).toHaveLength(0);
     expect(h.uploads).toHaveLength(0);
@@ -348,7 +474,7 @@ describe("Batches.submit — the happy path", () => {
     const handle = await h.client.batches.submit(
       [{ custom_id: "one", body: PRICED }, { body: PRICED }],
       "1h",
-      { providers: [1, 2] },
+      { providers: [1] },
     );
 
     // Exactly one terms-only challenge for the whole batch, and one upload.
@@ -366,9 +492,8 @@ describe("Batches.submit — the happy path", () => {
       expect(isUsd(row.amount)).toBe(true);
     }
 
-    // Round-robin across the providers given.
-    expect((rows[0]!.designated as number)).toBe(1);
-    expect((rows[1]!.designated as number)).toBe(2);
+    // Both planned onto the one provider the list allows.
+    expect(rows.map((r) => r.designated as number)).toEqual([1, 1]);
 
     // Two lines, two containers, two job ids: each line is sealed under its own
     // fresh seed, so nothing here is one sealed line written down twice.
@@ -386,22 +511,81 @@ describe("Batches.submit — the happy path", () => {
     ]);
   });
 
-  it("spreads lines round-robin, wrapping past the end of the provider list", async () => {
-    const h = batchHarness({ gasFee: 7n });
-    await h.client.batches.submit([{ body: PRICED }, { body: PRICED }, { body: PRICED }], "1h", {
-      providers: [1, 2],
+  it("plans a batch list only onto its providers and seals each line to the one it lands on", async () => {
+    const h = batchHarness({
+      gasFee: 7n,
+      allocation: (entry) => [
+        { ...marketCandidate(3), lines: 1 },
+        { ...marketCandidate(7), lines: (entry.lines as number) - 1 },
+      ],
     });
+    await h.client.batches.submit(
+      [{ body: { model: "m" } }, { body: { model: "m" } }, { body: { model: "m" } }],
+      "24h",
+      { providers: [7, 3] },
+    );
+    // One entry, naming the allowed set.
     expect(
-      manifestRows(h.uploads[0]!).map((r) => (r.designated as number)),
-    ).toEqual([1, 2, 1]);
+      (h.plans[0]!.models as Record<string, unknown>[]).map((m) => [m.lines, m.providers]),
+    ).toEqual([[3, [3, 7]]]);
+    const rows = manifestRows(h.uploads[0]!);
+    expect(rows.map((r) => [r.designated, r.rate_in])).toEqual([
+      [3, "0.003"],
+      [7, "0.007"],
+      [7, "0.007"],
+    ]);
+  });
+
+  it("reads each distinct provider's record once per submit, not once per line", async () => {
+    const h = batchHarness({ gasFee: 7n });
+    const line = (provider: number) => ({ body: { model: "m", provider } });
+    await h.client.batches.submit([line(3), line(7), line(3), line(7), line(3)], "24h");
+    const records = h.calls.filter((c) => /\/evm\/providers\/\d+$/.test(c.url));
+    expect(records.map((c) => new URL(c.url).pathname).sort()).toEqual([
+      "/evm/providers/3",
+      "/evm/providers/7",
+    ]);
+    // And the catalog reads do not grow with the file: the same for one line
+    // as for five — the model id is resolved once and shared too.
+    const one = batchHarness({ gasFee: 7n });
+    await one.client.batches.submit([line(3)], "24h");
+    const catalog = (calls: { url: string }[]) =>
+      calls.filter((c) => new URL(c.url).pathname === "/v1/models").length;
+    expect(catalog(h.calls)).toBe(catalog(one.calls));
+    expect(manifestRows(h.uploads[0]!).map((r) => r.designated)).toEqual([3, 7, 3, 7, 3]);
+  });
+
+  it("lets a line's own provider override the batch list", async () => {
+    const h = batchHarness({ gasFee: 7n });
+    await h.client.batches.submit(
+      [{ body: { model: "m" } }, { body: { model: "m", provider: 3 } }],
+      "24h",
+      { providers: [7] },
+    );
+    expect(
+      (h.plans[0]!.models as Record<string, unknown>[]).map((m) => [m.lines, m.providers]),
+    ).toEqual([
+      [1, [7]],
+      [1, [3]],
+    ]);
+    const rows = manifestRows(h.uploads[0]!);
+    expect(rows.map((r) => [r.designated, r.rate_in])).toEqual([
+      [7, "0.007"],
+      [3, "0.003"],
+    ]);
+    // `provider` is a routing key: it never reaches the sealed model input.
+    for (const row of rows) {
+      expect(
+        openEnvelope(Uint8Array.from(Buffer.from(row.container as string, "base64")), row.owner as string)
+          .input,
+      ).toEqual({});
+    }
   });
 
   /**
-   * R9: an empty `providers` list is a batch of open orders, sealed to the
-   * coordinator's **verified** escrow key — the behaviour `_batches.py:98-105`
-   * describes ("Given nothing, every line is an open order: sealed to the
-   * coordinator's verified escrow key … That path requires a client built with
-   * `verifier=`, exactly as a single open `submit` does").
+   * An unrestricted batch whose lines the plan cannot place is a batch of open
+   * orders, sealed to the coordinator's **verified** escrow key — which needs a
+   * client built with `verifier`, exactly as a single open `submit` does.
    *
    * The refusal without a verifier is asserted in the refusals block above.
    * These two are the same door from the other side.
@@ -421,9 +605,7 @@ describe("Batches.submit — the happy path", () => {
       },
     });
 
-    const handle = await h.client.batches.submit([{ body: PRICED }, { body: PRICED }], "1h", {
-      providers: [],
-    });
+    const handle = await h.client.batches.submit([{ body: PRICED }, { body: PRICED }], "1h");
 
     const rows = manifestRows(h.uploads[0]!);
     expect(rows).toHaveLength(2);
@@ -457,7 +639,7 @@ describe("Batches.submit — the happy path", () => {
    * swapped read 4145.
    */
   it("prices every line from its own terms plus the one gas fee", async () => {
-    const h = batchHarness({ gasFee: 7n });
+    const h = batchHarness({ gasFee: 7n, allocation: AT_CEILINGS });
     await h.client.batches.submit([{ body: PRICED }, { body: PRICED }], "1h", { providers: [1] });
     const rows = manifestRows(h.uploads[0]!);
     expect(rows.map((r) => r.amount)).toEqual(["0.008281", "0.008281"]);
@@ -465,7 +647,7 @@ describe("Batches.submit — the happy path", () => {
 
   // cap 8193 (derivation above) ; fee = floor(8193 * 250 / 10000) = 204 ; amount = 8193 + 204 + 7 = "0.008404"
   it("adds the protocol fee on top of every line's cap", async () => {
-    const h = batchHarness({ gasFee: 7n, feeBps: 250 });
+    const h = batchHarness({ gasFee: 7n, feeBps: 250, allocation: AT_CEILINGS });
     await h.client.batches.submit([{ body: PRICED }, { body: PRICED }], "1h", { providers: [1] });
     const rows = manifestRows(h.uploads[0]!);
     expect(rows.map((r) => r.amount)).toEqual(["0.008404", "0.008404"]);
@@ -568,7 +750,7 @@ describe("Batches.submit — the happy path", () => {
     // The control: the same branch accepts a USD string at the token's full
     // precision, so the refusals above are the guard doing its job rather than
     // the branch rejecting everything.
-    const ok = batchHarness({ gasFeeRaw: "0.000007" });
+    const ok = batchHarness({ gasFeeRaw: "0.000007", allocation: AT_CEILINGS });
     await ok.client.batches.submit([{ body: PRICED }], "1h", { providers: [1] });
     expect(ok.creates).toHaveLength(1);
     // And it was read at ctx.decimals: 8193 + 81 + 7 atomic.

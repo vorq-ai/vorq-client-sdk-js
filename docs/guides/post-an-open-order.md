@@ -62,5 +62,6 @@ act on a revoked key immediately, build a new `Client`, or name a provider.
 
 ## Open batches
 
-`client.batches.submit(lines, window, { providers: [] })` makes every line an open order, under
-the same rule: the client needs a `verifier`.
+In `client.batches.submit(lines, window)`, an unrestricted line (no `providers` option, no
+`body.provider`) that the plan cannot place is an open order, under the same rule: the client
+needs a `verifier`.

@@ -66,7 +66,7 @@ export function evidence(over: EvidenceOverrides = {}): Record<string, unknown> 
 
 /** A provider registry record in the shape `GET /evm/providers/:id` serves. */
 export function record(ev: unknown = evidence(), provider = 7): Record<string, unknown> {
-  return { provider, operator: WALLET, box_key: BOX, evidence: ev };
+  return { provider, name: null, operator: WALLET, box_key: BOX, evidence: ev };
 }
 
 /**
@@ -77,6 +77,7 @@ export function record(ev: unknown = evidence(), provider = 7): Record<string, u
 export function otherRecord(provider = 2): Record<string, unknown> {
   return {
     provider,
+    name: null,
     operator: OTHER_WALLET,
     box_key: OTHER_BOX,
     evidence: { ...evidence(), report_data: bindingOf(OTHER_BOX, OTHER_WALLET) },

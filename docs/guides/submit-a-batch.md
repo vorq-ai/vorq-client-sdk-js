@@ -25,9 +25,9 @@ them was priced at. It caps the input side only; add `max_rate_out` to cap the o
 Set it too low and no provider matches: the line [rests](../reference/submit.md#how-the-rates-are-chosen) and may expire without being
 served.
 
-- `body.model` is required. `body.max_rate_in`, `body.max_rate_out` and `body.units_out` are
-  order terms, taken out of the body; everything else in `body` is the model input. The
-  ceilings are optional.
+- `body.model` is required. `body.max_rate_in`, `body.max_rate_out`, `body.units_out` and
+  `body.provider` are order terms, taken out of the body; everything else in `body` is the model
+  input. The ceilings and the provider are optional.
 - Before sealing, the client asks the coordinator for a plan: which providers within each
   line's ceilings take how many lines, and at which ask. A provider is never given more lines
   than its on-chain capacity leaves free, and each planned line signs its provider's ask and is
@@ -35,20 +35,26 @@ served.
 - A line the plan cannot place rests at its ceilings, with the market rate on a side that names
   none. A line with no ceiling cannot rest: if the network cannot take all such lines of a
   model in the window, `submit` raises `ValidationError` before anything is signed.
+- `body.provider` restricts a line to exactly one provider id, overriding the batch's
+  `providers`. A restricted line never rests (see below).
 - `url` defaults to `/v1/responses`. `method` is ignored.
 - `requests` may also be a JSONL string of such lines.
 
 ## Submit
 
 ```ts
-const batch = await client.batches.submit(requests, "24h", { providers: [] });
+const batch = await client.batches.submit(requests, "24h");
 await store.put(batch.id, { jobIds: batch.jobIds });   // keep both before waiting
 ```
 
-- **`providers`** is required and applies to resting lines only; planned lines go where the plan
-  puts them. Resting lines are assigned round-robin across the list, each sealed to its own
-  provider. With an empty list (`{ providers: [] }`) every resting line is an
-  [open order](./post-an-open-order.md), which needs a client built with a `verifier`.
+- **`providers`** is optional: an allow-list (`{ providers: [3, 7] }`) for every line without a
+  `body.provider` of its own. Those lines are planned only onto the listed providers, cheapest
+  first. A restricted line never rests: if the allowed providers' asks do not clear its
+  ceilings, or they lack the capacity, the whole batch raises `ValidationError` before anything
+  is signed, naming the model, how many lines could not be placed and the allowed providers.
+- Without a list or a `body.provider`, a line goes where the plan puts it, and a line the plan
+  cannot place rests as an [open order](./post-an-open-order.md), which needs a client built with
+  a `verifier`.
 - The window is `"1h"` / `"24h"`, or the tier names `"async"` / `"batch"`; it defaults to
   `"24h"`. A `"24h"` batch usually takes minutes to a few hours; 24 hours is the maximum.
 - `metadata` (at most 16 string pairs) is optional and stored **in plaintext** on the batch

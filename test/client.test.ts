@@ -451,11 +451,17 @@ describe("the reads", () => {
     const { client: c } = client({
       ...HANDSHAKE,
       "GET /evm/providers/7": () =>
-        json({ provider_id: 7, operator: ADDRESS, box_key: `0x${"ab".repeat(32)}`, listed: true, as_of_block: 900 }),
+        json({ provider_id: 7, operator: ADDRESS, name: "Acme", box_key: `0x${"ab".repeat(32)}`, listed: true, as_of_block: 900 }),
+      "GET /evm/providers/8": () =>
+        json({ provider_id: 8, operator: ADDRESS, name: null, box_key: `0x${"ab".repeat(32)}`, listed: true, as_of_block: 900 }),
+      "GET /evm/providers/9": () =>
+        json({ provider_id: 9, operator: ADDRESS, name: 9, box_key: `0x${"ab".repeat(32)}`, listed: true, as_of_block: 900 }),
       "GET /evm/allowlist": () =>
         json({ entries: [{ key: `0x${"cd".repeat(32)}`, status: 1, entry: {} }], as_of_block: 900 }),
     });
-    expect((await c.providers(7)).providerId).toBe(7);
+    expect(await c.providers(7)).toMatchObject({ providerId: 7, name: "Acme" });
+    expect((await c.providers(8)).name).toBeNull();
+    await expect(c.providers(9)).rejects.toThrow(/GET \/evm\/providers\/9: name is not a string or null/);
     expect((await c.allowlist()).entries).toHaveLength(1);
   });
 
@@ -483,98 +489,6 @@ describe("the reads", () => {
     });
     await c.models.retrieve("org/model:fp8");
     expect(hits.at(-1)).toBe("GET /v1/models/org/model%3Afp8");
-  });
-
-  it("reads the floors listing through the paged transport, rates as USD strings", async () => {
-    const { client: c, hits } = client({
-      ...HANDSHAKE,
-      "GET /evm/asks/floors": () =>
-        json(
-          {
-            floors: [{ model_id: 7, sla: 3600, rate_in: "0.44", rate_out: "9007199254.740993" }],
-            as_of_block: 900,
-          },
-          { headers: { "x-vorq-page-truncated": "false" } },
-        ),
-    });
-    const book = await c.floors({ model: 7, limit: 1000, offset: 0 });
-    expect(hits.at(-1)).toContain("/evm/asks/floors?");
-    expect(hits.at(-1)).toContain("model=7");
-    expect(hits.at(-1)).toContain("limit=1000");
-    // `offset=0` is the value a truthiness check would drop, and dropping it
-    // makes a floors walk re-read page one forever.
-    expect(hits.at(-1)).toContain("offset=0");
-    expect(book.floors).toEqual([{ modelId: 7, sla: 3600, rateIn: "0.44", rateOut: "9007199254.740993" }]);
-    expect(book.asOfBlock).toBe(900n);
-    // One row against a limit of 1000: the last page.
-    expect(book.nextOffset).toBeNull();
-  });
-
-  it("sends the floors window and a non-zero offset, and no window when none was named", async () => {
-    const { client: c, hits } = client({
-      ...HANDSHAKE,
-      "GET /evm/asks/floors": () => json({ floors: [], as_of_block: 900 }),
-    });
-    // The tier names `submit` takes, resolved to the window's seconds on the wire.
-    await c.floors({ model: 7, sla: "batch", limit: 10, offset: 20 });
-    expect(hits.at(-1)).toContain("sla=86400");
-    expect(hits.at(-1)).toContain("offset=20");
-    await c.floors({ sla: "async" });
-    expect(hits.at(-1)).toContain("sla=3600");
-    await c.floors({ sla: "24h" });
-    expect(hits.at(-1)).toContain("sla=86400");
-    await c.floors();
-    expect(hits.at(-1)).not.toContain("sla=");
-  });
-
-  it("refuses a floors window it does not know, with nothing on the wire", async () => {
-    const { client: c, hits } = client({
-      ...HANDSHAKE,
-      "GET /evm/asks/floors": () => json({ floors: [], as_of_block: 900 }),
-    });
-    const before = hits.length;
-    // No one-hour fallback: a typo priced as the 1 h window is the wrong order signed.
-    await expect(c.floors({ sla: "batc" as "batch" })).rejects.toBeInstanceOf(ValidationError);
-    await expect(c.floors({ sla: 3600 as unknown as "async" })).rejects.toBeInstanceOf(ValidationError);
-    expect(hits.length).toBe(before);
-  });
-
-  it("hands back the floors page's next offset absolute, not added to the one asked for", async () => {
-    const { client: c } = client({
-      ...HANDSHAKE,
-      "GET /evm/asks/floors": () =>
-        json(
-          {
-            floors: [{ model_id: 7, sla: 3600, rate_in: "0.000001", rate_out: "0.000002" }],
-            as_of_block: 900,
-          },
-          { headers: { "x-vorq-page-truncated": "true", "x-vorq-next-offset": "40" } },
-        ),
-    });
-    const book = await c.floors({ limit: 1000, offset: 20 });
-    expect(book.truncated).toBe(true);
-    // The header's own value — not `offset + rows.length`, and not `offset + 40`.
-    expect(book.nextOffset).toBe(40);
-  });
-
-  it("refuses a floor it cannot read as a USD string, rather than quoting zero", async () => {
-    // A floor is the rate an order signs, so a `"0"` standing in for an
-    // unreadable rate is a model quoted as free.
-    const bad = (body: unknown) =>
-      client({ ...HANDSHAKE, "GET /evm/asks/floors": () => json(body) }).client.floors({ model: 7 });
-    const row = { model_id: 7, sla: 3600, rate_in: "0.000001", rate_out: "0.000002" };
-    const page = (floors: unknown[]) => ({ floors, as_of_block: 900 });
-    await expect(bad(page([row]))).resolves.toBeDefined();
-    await expect(bad(page([{ ...row, rate_in: 1 }]))).rejects.toBeInstanceOf(VorqError);
-    await expect(bad(page([{ ...row, rate_out: undefined }]))).rejects.toBeInstanceOf(VorqError);
-    await expect(bad(page([{ ...row, rate_in: "1e30" }]))).rejects.toBeInstanceOf(VorqError);
-    await expect(bad(page([{ ...row, rate_in: "-1" }]))).rejects.toBeInstanceOf(VorqError);
-    await expect(bad(page([{ ...row, model_id: 7.5 }]))).rejects.toBeInstanceOf(VorqError);
-    await expect(bad(page([{ ...row, model_id: "x" }]))).rejects.toBeInstanceOf(VorqError);
-    await expect(bad(page([{ ...row, sla: null }]))).rejects.toBeInstanceOf(VorqError);
-    // A `null` element is a `VorqError` too — `Object.hasOwn(null, …)` would
-    // throw a `TypeError` straight out of the SDK's error taxonomy.
-    await expect(bad(page([null]))).rejects.toBeInstanceOf(VorqError);
   });
 
   it("refuses a job row whose gas_fee is not a USD string, on every job read", async () => {

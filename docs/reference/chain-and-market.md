@@ -1,6 +1,6 @@
 ---
 title: Chain and market reads
-description: The deployment context, provider asks and floors, the job book, wallet summaries, provider records and the escrow key.
+description: The deployment context, provider asks, the job book, wallet summaries, provider records and the escrow key.
 ---
 
 Reads of on-chain state, served by the coordinator. Model and provider filters take **integer
@@ -10,7 +10,6 @@ ids**, not names; get a model's id from `Number(model.vorq.model_id)`.
 | --- | --- |
 | `chainContext()` | [`ChainContext`](#chaincontext) |
 | `asks({ model?, limit?, offset? })` | [`AskBook`](#asks) |
-| `floors({ model?, sla?, limit?, offset? })` | [`FloorBook`](#floors) |
 | `jobs({ state?, model?, provider?, owner?, postedBefore?, order?, limit?, offset? })` | [`JobBook`](#jobs) |
 | `jobsSummary({ owner })` | [`JobsSummary`](#jobssummary) |
 | `evmJob(jobId)` | One job row in its on-chain shape ([`EvmJob`](#jobs), a plain record). |
@@ -33,7 +32,7 @@ client's lifetime.
 
 ## Paging
 
-`AskBook`, `FloorBook`, `JobBook` and `Allowlist` are pages. Each carries `asOfBlock`
+`AskBook`, `JobBook` and `Allowlist` are pages. Each carries `asOfBlock`
 (`bigint | null`), `truncated` and `nextOffset`:
 
 - Loop on `nextOffset`, passing it back as `offset`, until it is `null`. `truncated` alone (the
@@ -59,17 +58,6 @@ Published provider asks. `AskBook.asks` is a list of:
 | `providerId`, `modelId` | `number` |
 | `sla` | `number` (window seconds) |
 | `rateIn`, `rateOut` | `string` (USD per 1M units) |
-
-## `floors`
-
-The cheapest ask per `(model, window)` across listed providers. Input and output are minimised
-independently, so the two floors may come from different providers. `sla` narrows to one
-window: `"async"`, `"batch"`, `"1h"` or `"24h"`; any other value raises `ValidationError` before
-a request.
-
-`FloorBook.floors` is a list of `{ modelId, sla, rateIn, rateOut }`, typed as in `asks`. A rate
-in the response that is not a USD decimal string, or a count that is not an integer, raises
-`VorqError` rather than defaulting to zero.
 
 ## `jobs`
 
@@ -102,7 +90,8 @@ A count that is not an integer, or an `escrowed` that is not a USD decimal strin
 
 ## `providers`
 
-`ProviderRecord`: `providerId`, `operator` (address), `boxKey` (the Curve25519 key designated
+`ProviderRecord`: `providerId`, `operator` (address), `name` (the curated display name, or
+`null`), `boxKey` (the Curve25519 key designated
 orders are sealed to, `0x`-prefixed), `listed` and `raw` (the full record, including any
 attestation evidence).
 

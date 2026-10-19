@@ -11,7 +11,7 @@ import type { Hex } from "viem";
 import { ChainContext, OrderTerms, capFor, parseCeiling, parseRate, paymentDomain } from "./terms.js";
 // A value import, and the reason `batches.ts` may only import from here with
 // `import type`: two runtime imports would be a real module cycle.
-import { Batches } from "./batches.js";
+import { Batches, once } from "./batches.js";
 import { Models } from "./models.js";
 import { wallNow } from "./clock.js";
 // `import type`, deliberately: nothing here constructs a `Verifier`, so this
@@ -35,7 +35,7 @@ import { own } from "./own.js";
 import { checkInput } from "./params.js";
 import { formatUsd, isUsd, parseUsd } from "./money.js";
 import { asBigInt } from "./scalars.js";
-import { knownWindowSeconds, normalizeSla, slaSeconds, windowFromSeconds } from "./sla.js";
+import { normalizeSla, slaSeconds, windowFromSeconds } from "./sla.js";
 import {
   buildContainer,
   commitmentOf,
@@ -261,20 +261,6 @@ export interface AskBook extends PagedListing {
   asOfBlock: bigint | null;
 }
 
-/** `GET /evm/asks/floors`: the cheapest ask per `(model, window)`, each leg minimised independently. */
-export interface Floor {
-  modelId: number;
-  sla: number;
-  /** USD per 1M units of work, a decimal string. */
-  rateIn: string;
-  rateOut: string;
-}
-
-export interface FloorBook extends PagedListing {
-  floors: Floor[];
-  asOfBlock: bigint | null;
-}
-
 export interface JobQuery {
   /** One of `Open`, `Claimed`, `Settled`, `Cancelled` — the node's own spelling. */
   state?: "Open" | "Claimed" | "Settled" | "Cancelled";
@@ -451,11 +437,25 @@ export interface SealLineArgs {
   unitsOut?: number;
   customId?: string;
   ctx: ChainContext;
+  /**
+   * Reads shared across the lines of one batch: each distinct provider's
+   * registry record and each model's id, read once. Unset, this line reads its
+   * own.
+   */
+  memo?: SealMemo;
+}
+
+/** What `sealLine` reads once per key rather than once per line. */
+export interface SealMemo {
+  records: Map<number, Promise<ProviderRecord>>;
+  modelIds: Map<string, Promise<number>>;
 }
 
 export interface ProviderRecord {
   providerId: number;
   operator: string;
+  /** The curated display name, or `null` for a provider that has none. */
+  name: string | null;
   /** A Curve25519 key, `0x`-prefixed on this route. */
   boxKey: string;
   listed: boolean;
@@ -542,8 +542,7 @@ function usdOr(value: unknown): string {
  * The figures on the aggregate reads, refused rather than defaulted.
  *
  * A `0` standing in for an unreadable count is a plausible answer nobody would
- * question, and a `"0"` for an unreadable rate quotes a model as free — and a
- * floor is the rate an order signs, not a display figure. `countFigure` takes
+ * question, and a `"0"` for an unreadable sum quotes an escrow as empty. `countFigure` takes
  * only a JSON integer within `MAX_SAFE_INTEGER`, and `moneyFigure` only a USD
  * decimal string.
  *
@@ -583,9 +582,6 @@ function countFigure(what: string, rec: Record<string, unknown>, key: string): n
     ? value
     : refuseFigure(what, key, "is not an integer");
 }
-
-/** The SLA spellings `floors` filters by: the tier names, or their raw windows. */
-export type SlaWindow = "async" | "batch" | "1h" | "24h";
 
 export class Client {
   readonly baseUrl: string;
@@ -848,55 +844,6 @@ export class Client {
   }
 
   /**
-   * `GET /evm/asks/floors`. `model` is an integer id, not a name. Paged.
-   *
-   * `sla` narrows to one window, in seconds. A push is an upsert on an
-   * unvalidated `uint32`, so one provider can accumulate arbitrarily many
-   * windows on a real model and make the unfiltered listing as long as it
-   * likes; a caller pricing a job knows the window it wants.
-   *
-   * Every figure is **refused, never defaulted** — unlike `asks()`, which is a
-   * display listing. The floor the server answers is the rate an order signs,
-   * so a `"0"` for an unreadable rate is a model quoted as free.
-   */
-  async floors(
-    query: { model?: number; sla?: SlaWindow; limit?: number; offset?: number } = {},
-  ): Promise<FloorBook> {
-    // `sla` is the tier name `submit` takes (`"async"` / `"batch"`, or the raw
-    // window); the wire wants the window's seconds. An unknown name is refused
-    // rather than defaulted — a floor is the rate an order signs.
-    const sla = own(query, "sla");
-    const seconds = sla === undefined ? undefined : knownWindowSeconds(String(sla));
-    if (seconds === null) {
-      throw new ValidationError(
-        `floors: sla must be "async" or "batch" (or the window "1h" / "24h"), not ${JSON.stringify(sla)}`,
-        { type: "invalid_request_error" },
-      );
-    }
-    const page = await this.pageOf("/evm/asks/floors", "floors", query, {
-      model: own(query, "model") as number | undefined,
-      sla: seconds,
-      limit: own(query, "limit") as number | undefined,
-      offset: own(query, "offset") as number | undefined,
-    });
-    const what = "GET /evm/asks/floors";
-    return {
-      floors: page.rows.map((row) => {
-        const r = figureRecord(what, row, "floors");
-        return {
-          modelId: countFigure(what, r, "model_id"),
-          sla: countFigure(what, r, "sla"),
-          rateIn: moneyFigure(what, r, "rate_in"),
-          rateOut: moneyFigure(what, r, "rate_out"),
-        };
-      }),
-      asOfBlock: page.asOfBlock,
-      truncated: page.truncated,
-      nextOffset: page.nextOffset,
-    };
-  }
-
-  /**
    * `GET /evm/jobs/summary` — one wallet's counts and escrow sum.
    *
    * Every figure is refused rather than defaulted: a summary is printed as
@@ -1087,9 +1034,14 @@ export class Client {
     // **non-confidential designated order seals to a key nobody published**.
     // `verifyRecord` does not catch it: it guards only the `confidential: true`
     // branch, and every batch line is `confidential: false` by construction.
+    const name = own(row, "name");
+    if (name !== null && typeof name !== "string") {
+      refuseFigure(`GET /evm/providers/${Math.trunc(id)}`, "name", "is not a string or null");
+    }
     return {
       providerId: asNumber(own(row, "provider_id")),
       operator: String(own(row, "operator") ?? ""),
+      name,
       boxKey: String(own(row, "box_key") ?? ""),
       listed: own(row, "listed") === true,
       raw: row,
@@ -1460,11 +1412,13 @@ export class Client {
       own(args as unknown as Record<string, unknown>, key) as SealLineArgs[K];
     const { unitsIn, unitsOut } = declareUnits(arg("payloadInput"), arg("unitsOut"));
     const ctx = arg("ctx");
+    const memo = arg("memo") ?? { records: new Map(), modelIds: new Map() };
     const { recipient, designated } = await this.recipientFor(
       arg("provider"),
       // `false` by omission, which is the batch surface's answer: it carries no
       // confidential flag in either SDK, so a batch line never sets one.
       arg("confidential") ?? false,
+      memo.records,
     );
     const { container, c } = this.sealContainer(
       recipient,
@@ -1475,7 +1429,7 @@ export class Client {
     const jobId = jobIdFor(owner, c);
     const terms = new OrderTerms({
       c,
-      modelId: await this.modelIdFor(arg("model")),
+      modelId: await once(memo.modelIds, arg("model"), () => this.modelIdFor(arg("model"))),
       slaSecs: slaSeconds(arg("window")),
       rateIn: parseRate(arg("rateIn"), "rate_in", ctx.decimals),
       rateOut: parseRate(arg("rateOut"), "rate_out", ctx.decimals),
@@ -1720,12 +1674,13 @@ export class Client {
   private async recipientFor(
     provider: number | undefined | null,
     confidential: boolean,
+    records: Map<number, Promise<ProviderRecord>>,
   ): Promise<{ recipient: string; designated: number }> {
     if (confidential && this.verifier === null) refuseConfidential();
     if (provider === undefined || provider === null) {
       return { recipient: await this.escrowRecipient(), designated: 0 };
     }
-    const record = await this.providers(provider);
+    const record = await once(records, provider, () => this.providers(provider));
     if (confidential) {
       // An unverified pin is a refusal and never a substitution: this raises
       // rather than quietly sealing to somebody else.

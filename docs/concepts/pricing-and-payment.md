@@ -102,9 +102,6 @@ took) and `.gasFee`, both USD strings.
 
 ## Finding a price
 
-- `client.asks({ model })` lists each provider's published rates per window.
-- `client.floors({ model, sla })` gives the cheapest input and output rate per window. The two
-  minima may come from different providers.
-
-Both take the model's integer id (`Number(model.vorq.model_id)` from `client.models.list()`),
-not its name. See [Chain and market reads](../reference/chain-and-market.md).
+`client.asks({ model })` lists each provider's published rates per window. It takes the model's
+integer id (`Number(model.vorq.model_id)` from `client.models.list()`), not its name. See
+[Chain and market reads](../reference/chain-and-market.md).

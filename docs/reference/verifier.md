@@ -69,7 +69,7 @@ being treated as empty.
 | --- | --- |
 | `submit({ confidential: true })` without a verifier | `ValidationError`, before any request. |
 | `submit()` with no `provider`, without a verifier | `EscrowKeyUnverified`, nothing posted. |
-| `batches.submit(…, { providers: [] })` without a verifier | `EscrowKeyUnverified`, nothing uploaded. |
+| `batches.submit()` with an unrestricted line that rests, without a verifier | `EscrowKeyUnverified`, nothing uploaded. |
 | An escrow key that fails verification | `EscrowKeyUnverified`, with the `VerificationError` as `.cause`. |
 | A named provider that fails under `confidential: true` | `VerificationError`. Never substituted. |
 
