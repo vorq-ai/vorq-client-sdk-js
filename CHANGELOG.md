@@ -12,9 +12,15 @@ Semver, with two points spelled out:
 - **Deep imports are not covered at any version.** Reaching past the package's exports into
   `dist/` is reaching into an implementation.
 
-Prereleases are published under the `next` dist-tag.
+Every release bumps the patch version (`0.2.0`, `0.2.1`, …), so the `^0.2.0` range that
+`npm install` records picks up each one. A breaking change bumps the minor (`0.3.0`), which a
+`^0.2.x` range does not take.
 
 ## [Unreleased]
+
+## [0.2.0] — 2026-10-19
+
+The first stable release.
 
 ### Changed
 
