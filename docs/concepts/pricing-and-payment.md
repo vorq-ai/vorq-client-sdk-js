@@ -12,9 +12,9 @@ The simplest order names one ceiling and no provider:
 
 ```ts
 const handle = await client.submit({
-  model: "z-ai/glm-5.3",
+  model: "stepfun-ai/step-5-preview",
   input: "Summarize the plot of Hamlet in three bullet points.",
-  maxRateIn: "0.28",       // never more than $0.28 per 1M input tokens
+  maxRateIn: "0.2",       // never more than $0.20 per 1M input tokens
 });
 ```
 

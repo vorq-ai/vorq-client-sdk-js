@@ -14,7 +14,7 @@ Each line is an OpenAI-style batch request. Put the model in `body`:
 const requests = prompts.map((prompt, i) => ({
   custom_id: `row-${i}`,             // optional, 1–64 characters, unique in the batch
   url: "/v1/responses",              // or "/v1/embeddings"; one endpoint per batch
-  body: { model: "z-ai/glm-5.3", input: prompt, max_output_tokens: 512, max_rate_in: "0.28" },
+  body: { model: "stepfun-ai/step-5-preview", input: prompt, max_output_tokens: 512, max_rate_in: "0.2" },
 }));
 ```
 
