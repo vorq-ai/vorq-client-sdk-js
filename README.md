@@ -56,8 +56,8 @@ if (result instanceof TextResult) console.log(result.text, result.cost);
 ```
 
 Use a dedicated wallet funded with your inference budget, never a main wallet's key.
-VORQ runs on the Base Sepolia testnet: fund the wallet with free test USDC from
-[faucet.circle.com](https://faucet.circle.com) (pick USDC and Base Sepolia). No ETH is needed.
+VORQ runs on Base: fund the wallet with USDC on Base (buy or withdraw it to the Base network,
+or bridge it). No ETH is needed.
 
 ## Documentation
 
