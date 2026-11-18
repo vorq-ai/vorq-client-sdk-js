@@ -28,8 +28,6 @@ you hold. The coordinator sees routing terms and ciphertext, never a prompt or a
 npm install @vorq-ai/client-sdk
 ```
 
-Prereleases are published under the `next` dist-tag: `npm install @vorq-ai/client-sdk@next`.
-
 The OpenAI-compatible path also needs the `openai` package, which you install yourself:
 `npm install openai`.
 

@@ -18,6 +18,14 @@ Every release bumps the patch version (`0.2.0`, `0.2.1`, …), so the `^0.2.0` r
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-11-18
+
+### Changed
+
+- The network runs on Base mainnet. The docs describe funding a wallet with USDC on Base, and
+  the examples use `moonshotai/kimi-k3.1-pro:mxfp4`. Model ids carry a precision suffix.
+  No code change.
+
 ## [0.2.0] — 2026-10-19
 
 The first stable release. Releases are stable from here, one patch per release; `1.0.0` still

@@ -18,8 +18,6 @@ You need Node ≥ 22.
 npm install @vorq-ai/client-sdk
 ```
 
-Prereleases are published under the `next` dist-tag: `npm install @vorq-ai/client-sdk@next`.
-
 ## 2. Set your wallet key
 
 ```sh
