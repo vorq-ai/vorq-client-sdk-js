@@ -2149,6 +2149,7 @@ describe("client — the escrow announcement, the file row and the listings", ()
         ["sla", 9],
         ["rate_in", "999"],
         ["rate_out", "999"],
+        ["rate_in_cached", "999"],
       ],
       () => c.asks(),
     );
@@ -2158,6 +2159,7 @@ describe("client — the escrow announcement, the file row and the listings", ()
       sla: 0,
       rateIn: "0",
       rateOut: "0",
+      rateInCached: "0",
     });
   });
 

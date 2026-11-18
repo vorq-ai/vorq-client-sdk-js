@@ -224,6 +224,11 @@ export interface Ask {
   /** USD per 1M units of work, a decimal string (e.g. `"0.05"`). */
   rateIn: string;
   rateOut: string;
+  /**
+   * USD per 1M cached input units, at most `rateIn`; equal to `rateIn` when the
+   * provider lists no discount. Listed beside the ask, not signed in it.
+   */
+  rateInCached: string;
 }
 
 /**
@@ -807,12 +812,15 @@ export class Client {
     return {
       asks: page.rows.map((row) => {
         const r = row as Record<string, unknown>;
+        const rateIn = usdOr(own(r, "rate_in"));
+        const cached = own(r, "rate_in_cached");
         return {
           providerId: asNumber(own(r, "provider_id")),
           modelId: asNumber(own(r, "model_id")),
           sla: asNumber(own(r, "sla")),
-          rateIn: usdOr(own(r, "rate_in")),
+          rateIn,
           rateOut: usdOr(own(r, "rate_out")),
+          rateInCached: isUsd(cached) ? cached : rateIn,
         };
       }),
       asOfBlock: page.asOfBlock,

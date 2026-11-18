@@ -210,6 +210,18 @@ const WHOLE = { "x-vorq-page-truncated": "false" };
 const rows = (n: number): Record<string, unknown>[] =>
   Array.from({ length: n }, (_, i) => ({ key: `0x${i}`, status: 1 }));
 
+describe("the ask book", () => {
+  it("reads each row's listed cached input rate", async () => {
+    const row = { provider_id: 7, model_id: 3, sla: 3600, rate_in: "0.0015", rate_out: "0.006" };
+    const c = clientWithFetch(() =>
+      json({ asks: [{ ...row, rate_in_cached: "0.00075" }], as_of_block: 9 }, 200, WHOLE),
+    );
+    expect((await c.asks()).asks).toEqual([
+      { providerId: 7, modelId: 3, sla: 3600, rateIn: "0.0015", rateOut: "0.006", rateInCached: "0.00075" },
+    ]);
+  });
+});
+
 describe("the listings carry the paging signals", () => {
   it("reports where to resume after a FULL page the budget did not cut", async () => {
     // The failure this whole helper exists for. `truncated` is `false` and the

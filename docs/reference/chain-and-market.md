@@ -58,6 +58,7 @@ Published provider asks. `AskBook.asks` is a list of:
 | `providerId`, `modelId` | `number` |
 | `sla` | `number` (window seconds) |
 | `rateIn`, `rateOut` | `string` (USD per 1M units) |
+| `rateInCached` | `string` (USD per 1M cached input units, at most `rateIn`; equal to it when the provider lists no discount) |
 
 ## `jobs`
 
