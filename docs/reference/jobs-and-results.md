@@ -78,7 +78,7 @@ All three carry these members:
 | Member | Type | Meaning |
 | --- | --- | --- |
 | `rates` | `Rates` | The order's signed rates in USD per 1M units, `{ rateIn: string \| null; rateOut: string \| null }`. |
-| `cost` | `string` | `((promptTok − cachedTok) × rateIn + cachedTok × rateInCached + completionTok × rateOut) / 1 000 000`, as an exact decimal in USD. See [Pricing and payment](../concepts/pricing-and-payment.md#what-a-result-reports). |
+| `cost` | `string` | `((promptTok − cachedTok) × rateIn + cachedTok × rateInCached + completionTok × rateOut) / 1 000 000`, rounded up to the atomic unit (0.000001 USD, minimum one) exactly as the chain charges it. See [Pricing and payment](../concepts/pricing-and-payment.md#what-a-result-reports). |
 | `promptTok` | `number` | Prompt units the job settled on, cached ones included: the model's own count, at most `units_in`. For media, the declared reference units. From the job row or batch line (`vorq.prompt_tok`). |
 | `cachedTok` | `number` | The part of `promptTok` the model served from its cache (`vorq.cached_tok`). |
 | `completionTok` | `number` | Output units the job settled on, at most `units_out` (`vorq.completion_tok`). |

@@ -23,14 +23,14 @@ describe("cost", () => {
   it.each([
     // [input_tokens, output_tokens, rate_in, rate_out, expected]
     [1000, 500, "50", "150", "0.125"],
-    [0, 0, "0", "0", "0"],
+    [0, 0, "0", "0", "0.000001"], // the chain's one-atomic-unit floor
     [1, 0, "1", "0", "0.000001"],
     [18, 8, "220000", "750000", "9.96"],
     [2_000_000, 0, "50", "0", "100"],
     [20_000_000, 0, "50", "0", "1000"],
     [1000, 500, "0.05", "0.15", "0.000125"],
     [2_000_000, 1_000_000, "0.05", "0.4", "0.5"],
-    [1, 0, "0.000001", "0", "0.000000000001"],
+    [1, 0, "0.000001", "0", "0.000001"], // rounded up to the atomic unit the chain pays
     [1_000_000, 1_000_000, "2.50", "10", "12.5"],
   ])("text: (%i*%i + %i*%i)/1e6 = %s", (inTok, outTok, rIn, rOut, expected) => {
     const raw = bytes({
@@ -118,7 +118,7 @@ describe("cost", () => {
   it("bills a media job's reference units at rate_in", () => {
     const raw = bytes({ images: [{ b64: "", content_type: "image/png", width: 1024, height: 768 }] });
     const r = resultFromRaw(raw, { ...job("0.01", "0.02", counts(921_600, 786_432)), result_cid: "c" }, null);
-    expect(r.cost).toBe("0.02494464");
+    expect(r.cost).toBe("0.024945");
   });
 
   it("media unscales by RATE_SCALE like every other modality (R1)", () => {

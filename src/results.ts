@@ -31,7 +31,7 @@ function rateFixed(rate: string | null): { mantissa: bigint; scale: number } {
   return { mantissa: parseUsd(rate, scale), scale };
 }
 
-/** `Σ units × rate / 1M` in USD, exact, formatted by `formatCost`. */
+/** `Σ units × rate / 1M` in USD, rounded up to the atomic unit the chain pays, formatted by `formatCost`. */
 function usdCost(...legs: [bigint, string | null][]): string {
   const fixed = legs.map(([units, rate]) => ({ units, ...rateFixed(rate) }));
   const scale = Math.max(0, ...fixed.map((leg) => leg.scale));
@@ -39,7 +39,10 @@ function usdCost(...legs: [bigint, string | null][]): string {
     (sum, leg) => sum + leg.units * leg.mantissa * 10n ** BigInt(scale - leg.scale),
     0n,
   );
-  return formatCost(mantissa, scale + RATE_SCALE_POW10);
+  // The chain pays whole atomic units: max(1, ceil(Σ units × rate)) at six decimals.
+  const unit = 10n ** BigInt(scale);
+  const atomic = (mantissa + unit - 1n) / unit;
+  return formatCost(atomic > 0n ? atomic : 1n, RATE_SCALE_POW10);
 }
 
 /**

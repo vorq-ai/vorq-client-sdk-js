@@ -26,7 +26,7 @@ routing terms and ciphertext, never a prompt or an output.
   (`PrivateKeySigner`).
 - A result key derived from the wallet (`deriveResultCipher`): one key to hold and back up.
 - Prices and amounts are USD decimal strings (rates in USD per 1M units); payment by EIP-3009
-  authorization in the deployment's USDC token; costs computed locally as exact decimals.
+  authorization in the deployment's USDC token; costs computed locally to the atomic unit the chain charges.
 - Durable jobs: store the id, re-attach later with `client.job(id)`.
 - Sealed batches (`client.batches`).
 - `sealingFetch`, which runs the stock `openai` package's Responses API over the sealed flow.
