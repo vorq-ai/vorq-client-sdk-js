@@ -45,7 +45,7 @@ import { Client, TextResult } from "@vorq-ai/client-sdk";
 const client = new Client(); // signs with $VORQ_WALLET_KEY; pass a BrowserWalletSigner in a browser
 
 const handle = await client.submit({
-  model: "stepfun-ai/step-5-preview",
+  model: "moonshotai/kimi-k3.1-pro:mxfp4",
   input: "Summarize the plot of Hamlet in three bullet points.",
   sla: "batch",
 });

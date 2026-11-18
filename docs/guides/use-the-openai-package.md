@@ -27,7 +27,7 @@ const openai = new OpenAI({
 });
 
 const response = await openai.responses.create({
-  model: "stepfun-ai/step-5-preview",
+  model: "moonshotai/kimi-k3.1-pro:mxfp4",
   input: "Say hello.",
   // The openai types do not know the `vorq` field, so state the params type.
   vorq: { sla: "batch" },
@@ -51,9 +51,9 @@ console.log(response.output_text);
 
 ```ts
 const response = await openai.responses.create({
-  model: "stepfun-ai/step-5-preview",
+  model: "moonshotai/kimi-k3.1-pro:mxfp4",
   input: "Say hello.",
-  vorq: { sla: "batch", max_rate_in: "0.2" },   // never more than $0.20 per 1M input tokens
+  vorq: { sla: "batch", max_rate_in: "1.5" },   // never more than $1.50 per 1M input tokens
 } as OpenAI.Responses.ResponseCreateParamsNonStreaming);
 ```
 
@@ -78,7 +78,7 @@ connection or, in a browser, the page:
 
 ```ts
 let response = await openai.responses.create({
-  model: "stepfun-ai/step-5-preview",
+  model: "moonshotai/kimi-k3.1-pro:mxfp4",
   input: "Summarize the attached notes in three bullet points.",
   background: true,
   vorq: { sla: "batch" },
