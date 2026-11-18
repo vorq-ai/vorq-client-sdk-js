@@ -70,6 +70,7 @@ const textResult = (
     cost: "0.0",
     gasFee: "0.03",
     fee: "0",
+    promptTok: 0, cachedTok: 0, completionTok: 0, rateInCached: null,
     provider: 1,
     jobId: "0xabc",
     customId: null,
@@ -84,6 +85,7 @@ const mediaResult = (frames: Record<string, unknown>[]): MediaResult =>
     cost: "0.0",
     gasFee: "0.03",
     fee: "0",
+    promptTok: 0, cachedTok: 0, completionTok: 0, rateInCached: null,
     provider: 1,
     jobId: "0xabc",
     customId: null,
@@ -99,6 +101,7 @@ const embeddingResult = (): EmbeddingResult =>
     cost: "0.0",
     gasFee: "0.03",
     fee: "0",
+    promptTok: 0, cachedTok: 0, completionTok: 0, rateInCached: null,
     provider: 1,
     jobId: "0xabc",
     customId: null,
@@ -1069,6 +1072,7 @@ describe("sealingFetch — create, retrieve and cancel", () => {
                 provider_id: 1,
                 ended_because: 0,
                 gas_fee: "0.03", fee: "0",
+                prompt_tok: 3, cached_tok: 0, completion_tok: 7,
               },
               ...options.row,
             });
@@ -1159,6 +1163,7 @@ describe("sealingFetch — create, retrieve and cancel", () => {
       provider_id: 1,
       ended_because: 0,
       gas_fee: "0.03", fee: "0",
+      prompt_tok: 3, cached_tok: 0, completion_tok: 7,
     });
 
     // **The secrecy property.** Every request param is inside the container and

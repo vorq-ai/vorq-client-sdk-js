@@ -133,7 +133,9 @@ answer.
 ## Units
 
 The order signs `units_in` and `units_out`, which settlement meters against `rateIn` and
-`rateOut`. The SDK derives both from the input object.
+`rateOut`. The SDK derives both from the input object. Both are ceilings: settlement charges the
+counts the model reports under them and refunds the rest (see
+[Pricing and payment](../concepts/pricing-and-payment.md#the-cap-and-the-payment)).
 
 **Shape.** The request is *text* if it names `max_output_tokens`, `max_tokens` or
 `max_completion_tokens`; else *video* if it names `duration` or `duration_secs`; else *image* if
@@ -163,7 +165,9 @@ else raises `ValidationError`.
 
 **`units_in`**:
 
-- Text and embeddings: one unit per four bytes of the input's canonical JSON, at least 1.
+- Text and embeddings: the byte length of the input's canonical JSON in UTF-8. It is a ceiling
+  that sits above the model's own prompt count for anything but a few-word prompt; settlement
+  bills the model's count and refunds the unused part.
 - Image and video: the reference assets in pixel-seconds, `width × height × max(1,
   duration_secs)` summed over the assets (a still counts as one second), `0` with none.
 

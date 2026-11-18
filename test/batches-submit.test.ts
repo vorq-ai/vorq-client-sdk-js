@@ -628,29 +628,29 @@ describe("Batches.submit — the happy path", () => {
    * The one gas read prices **every** line, and the price is local arithmetic
    * over the terms each line signed plus that fee.
    *
-   *   unitsIn  = max(1, floor(len(canonical({})) / 4)) = max(1, floor(2/4)) = 1
+   *   unitsIn  = len(canonical({})) = 2
    *   unitsOut = 4096 (nothing in this input names a size)
-   *   cap      = ceilDiv(1_000_000*1 + 2_000_000*4096, 1_000_000) = 8193
-   *   fee      = floor(8193 * 100 / 10000) = 81 (the harness quotes 1%)
-   *   amount   = cap + fee + gasFee = 8193 + 81 + 7 = 8281 atomic = "0.008281"
+   *   cap      = ceilDiv(1_000_000*2 + 2_000_000*4096, 1_000_000) = 8194
+   *   fee      = floor(8194 * 100 / 10000) = 81 (the harness quotes 1%)
+   *   amount   = cap + fee + gasFee = 8194 + 81 + 7 = 8282 atomic = "0.008282"
    *
    * Written out rather than computed with `capFor`, which would agree with any
-   * answer the code gave. A gas fee dropped on the floor reads 8274; the rates
-   * swapped read 4145.
+   * answer the code gave. A gas fee dropped on the floor reads 8275; the rates
+   * swapped read 4148.
    */
   it("prices every line from its own terms plus the one gas fee", async () => {
     const h = batchHarness({ gasFee: 7n, allocation: AT_CEILINGS });
     await h.client.batches.submit([{ body: PRICED }, { body: PRICED }], "1h", { providers: [1] });
     const rows = manifestRows(h.uploads[0]!);
-    expect(rows.map((r) => r.amount)).toEqual(["0.008281", "0.008281"]);
+    expect(rows.map((r) => r.amount)).toEqual(["0.008282", "0.008282"]);
   });
 
-  // cap 8193 (derivation above) ; fee = floor(8193 * 250 / 10000) = 204 ; amount = 8193 + 204 + 7 = "0.008404"
+  // cap 8194 (derivation above) ; fee = floor(8194 * 250 / 10000) = 204 ; amount = 8194 + 204 + 7 = "0.008405"
   it("adds the protocol fee on top of every line's cap", async () => {
     const h = batchHarness({ gasFee: 7n, feeBps: 250, allocation: AT_CEILINGS });
     await h.client.batches.submit([{ body: PRICED }, { body: PRICED }], "1h", { providers: [1] });
     const rows = manifestRows(h.uploads[0]!);
-    expect(rows.map((r) => r.amount)).toEqual(["0.008404", "0.008404"]);
+    expect(rows.map((r) => r.amount)).toEqual(["0.008405", "0.008405"]);
   });
 
   it("refuses a 402 whose quote carries no fee_bps", async () => {
@@ -753,8 +753,8 @@ describe("Batches.submit — the happy path", () => {
     const ok = batchHarness({ gasFeeRaw: "0.000007", allocation: AT_CEILINGS });
     await ok.client.batches.submit([{ body: PRICED }], "1h", { providers: [1] });
     expect(ok.creates).toHaveLength(1);
-    // And it was read at ctx.decimals: 8193 + 81 + 7 atomic.
-    expect(manifestRows(ok.uploads[0]!)[0]!.amount).toBe("0.008281");
+    // And it was read at ctx.decimals: 8194 + 81 + 7 atomic.
+    expect(manifestRows(ok.uploads[0]!)[0]!.amount).toBe("0.008282");
   });
 
   it("never repeats POST /v1/batches, even when the node marks the failure retryable", async () => {

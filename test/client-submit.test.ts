@@ -132,14 +132,16 @@ describe("unit declaration", () => {
     expect(order.units_out).toBe(4096);
   });
 
-  it("estimates units_in from the canonical payload, never below 1", async () => {
+  it("declares units_in as a ceiling: the canonical payload's byte length", async () => {
+    // Settle bills the backend's own prompt count under this and refunds the rest.
     const { order } = await sealedByASubmit({ input: "hi" });
-    const canonical = JSON.stringify({ input: "hi" });
-    expect(order.units_in).toBe(Math.max(1, Math.floor(canonical.length / 4)));
-    // An empty input canonicalizes to two bytes, and a job that declared zero
-    // input units would price its prompt leg at nothing.
+    expect(order.units_in).toBe(JSON.stringify({ input: "hi" }).length);
+    // An empty input canonicalizes to two bytes, never to zero.
     const empty = await sealedByASubmit({});
-    expect(empty.order.units_in).toBe(1);
+    expect(empty.order.units_in).toBe(2);
+    // Bytes, not UTF-16 units: "é" is two bytes of UTF-8, "😀" four.
+    const accented = await sealedByASubmit({ input: "é😀" });
+    expect(accented.order.units_in).toBe(new TextEncoder().encode('{"input":"é😀"}').length);
   });
 });
 
@@ -242,6 +244,17 @@ describe("the envelope and the container", () => {
     expect(openEnvelope(tagged.container, tagged.order.owner as string).custom_id).toBe(
       "batch-row-7",
     );
+  });
+
+  it("refuses a custom_id outside 1-64 characters, as on a batch line", async () => {
+    // The provider bounds the sealed envelope frame by this cap when it checks
+    // unitsIn against the payload size.
+    await expect(sealedByASubmit("hi", { customId: "x".repeat(65) })).rejects.toThrow(
+      /custom_id must be a 1-64 character string/,
+    );
+    await expect(sealedByASubmit("hi", { customId: "" })).rejects.toThrow(/custom_id/);
+    const ok = await sealedByASubmit("hi", { customId: "x".repeat(64) });
+    expect(openEnvelope(ok.container, ok.order.owner as string).custom_id).toBe("x".repeat(64));
   });
 
 });

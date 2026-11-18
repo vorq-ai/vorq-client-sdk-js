@@ -595,6 +595,8 @@ export function okRow(
         provider: 7,
         rate_in: "5",
         rate_out: "5",
+        prompt_tok: 1000,
+        cached_tok: 0,
         completion_tok: 1000,
         gas_fee: "0.03", fee: "0",
       },

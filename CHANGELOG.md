@@ -18,6 +18,21 @@ Every release bumps the patch version (`0.2.0`, `0.2.1`, …), so the `^0.2.0` r
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** text and embedding `units_in` is the byte length of the canonical JSON input
+  (was one unit per four bytes). It is a ceiling: settlement bills the model's own prompt count
+  under it and refunds the rest.
+- **Breaking:** `.cost` is the chain's charge off the job row's settled counts,
+  `((promptTok − cachedTok) × rateIn + cachedTok × rateInCached + completionTok × rateOut) / 1 000 000`,
+  for every result type. A job row or batch line without `prompt_tok`, `cached_tok` and
+  `completion_tok` is refused.
+
+### Added
+
+- `promptTok`, `cachedTok`, `completionTok` and `rateInCached` on `TextResult`, `MediaResult`
+  and `EmbeddingResult`.
+
 ## [0.2.1] — 2026-11-18
 
 ### Changed

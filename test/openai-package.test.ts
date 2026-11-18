@@ -121,7 +121,8 @@ function node(options: NodeOptions = {}): Route[] {
           object: "job",
           status: "completed",
           result_cid: CID,
-          vorq: { sla_secs: 3600, rate_in: "5", rate_out: "9", provider_id: 1, ended_because: 0, gas_fee: "0.03", fee: "0" },
+          vorq: { sla_secs: 3600, rate_in: "5", rate_out: "9", provider_id: 1, ended_because: 0, gas_fee: "0.03", fee: "0",
+                  prompt_tok: 3, cached_tok: 0, completion_tok: 7 },
         });
       },
     ],

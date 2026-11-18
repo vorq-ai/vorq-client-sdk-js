@@ -1620,6 +1620,13 @@ export class Client {
       input: payloadInput,
     };
     if (customId !== undefined && customId !== null) {
+      // 1-64 characters, as on a batch line: the provider bounds the envelope
+      // frame by it when it checks unitsIn against the payload size.
+      if (typeof customId !== "string" || customId === "" || customId.length > 64) {
+        throw new ValidationError("custom_id must be a 1-64 character string", {
+          type: "invalid_request_error",
+        });
+      }
       // Absent rather than null when unset: this object is canonicalized into
       // the commitment preimage, so a key that carries no meaning must not be
       // there — it would change `c`.

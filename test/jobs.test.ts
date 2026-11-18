@@ -14,7 +14,10 @@ const row = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   object: "job",
   status: "queued",
   result_cid: null,
-  vorq: { sla_secs: 3600, rate_in: "0", rate_out: "0", provider_id: 7, ended_because: 0, gas_fee: "0.03", fee: "0" },
+  vorq: {
+    sla_secs: 3600, rate_in: "0", rate_out: "0", provider_id: 7, ended_because: 0, gas_fee: "0.03", fee: "0",
+    prompt_tok: 0, cached_tok: 0, completion_tok: 0,
+  },
   ...over,
 });
 

@@ -50,8 +50,10 @@ whatever it is. When no provider is within the ceilings the order
 The order signs two rates, `rateIn` and `rateOut`, and two unit counts the SDK derives from the request
 before sealing:
 
-- **`units_in`**: the input. For text and embeddings, one unit per four bytes of the canonical
-  JSON input. For image and video, the reference assets you attach, in pixel-seconds.
+- **`units_in`**: the most input the job may bill. For text and embeddings, the byte length of
+  the canonical JSON input: a ceiling that sits above the model's own prompt count, chat
+  template included, for anything but a few-word prompt. For image and video, the reference
+  assets you attach, in pixel-seconds.
 - **`units_out`**: the most output the job may bill. For text, the output-token ceiling you set;
   for images, pixels per image times the image count; for video, frame pixels times seconds.
 
@@ -68,6 +70,19 @@ cap = ceil((rateIn × units_in + rateOut × units_out) / 1 000 000)     (at leas
 
 The chain computes this in atomic units, so the cap is at least one atomic unit
 (`"0.000001"` USD for a 6-decimal token).
+
+Settlement charges what the job used, never more than the cap:
+
+```
+charge = ceil(((promptTok − cachedTok) × rateIn
+              + cachedTok × rateInCached
+              + completionTok × rateOut) / 1 000 000)            (at least 1)
+```
+
+`promptTok` is the model's own prompt count, at most `units_in`; for media it is the declared
+reference units. `cachedTok` is the part of the prompt the model served from its cache, billed at
+`rateInCached`, which is never above `rateIn` (0 when the model reports none, always 0 for media).
+`completionTok` is the delivered output, at most `units_out`.
 
 At submission the coordinator quotes an amount in USD, and the client signs an EIP-3009
 `ReceiveWithAuthorization` for it in the deployment's USDC token. For a batch the client computes
@@ -94,9 +109,9 @@ job, and job rows report the gas fee it used as `gas_fee` and the protocol fee s
 
 ## What a result reports
 
-Each result's `.cost` is computed locally from the signed rates and the unit counts the result
-reports (token usage, delivered pixels or pixel-seconds), divided by 1 000 000, as an exact
-decimal string in **USD**, never rounded. It covers the rate charge only; the protocol fee and
+Each result's `.cost` is the charge formula above, computed locally from the counts and rates the
+job settled on (the job row's `prompt_tok`, `cached_tok`, `completion_tok`, `rate_in`,
+`rate_in_cached` and `rate_out`), as an exact decimal string in **USD**, never rounded. It covers the rate charge only; the protocol fee and
 gas fee are not included. They are reported separately as `.fee` (the protocol fee settlement
 took) and `.gasFee`, both USD strings.
 

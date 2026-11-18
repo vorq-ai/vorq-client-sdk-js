@@ -78,7 +78,11 @@ All three carry these members:
 | Member | Type | Meaning |
 | --- | --- | --- |
 | `rates` | `Rates` | The order's signed rates in USD per 1M units, `{ rateIn: string \| null; rateOut: string \| null }`. |
-| `cost` | `string` | Computed locally as an exact decimal, in USD. See [Pricing and payment](../concepts/pricing-and-payment.md#what-a-result-reports). |
+| `cost` | `string` | `((promptTok − cachedTok) × rateIn + cachedTok × rateInCached + completionTok × rateOut) / 1 000 000`, as an exact decimal in USD. See [Pricing and payment](../concepts/pricing-and-payment.md#what-a-result-reports). |
+| `promptTok` | `number` | Prompt units the job settled on, cached ones included: the model's own count, at most `units_in`. For media, the declared reference units. From the job row or batch line (`vorq.prompt_tok`). |
+| `cachedTok` | `number` | The part of `promptTok` the model served from its cache (`vorq.cached_tok`). |
+| `completionTok` | `number` | Output units the job settled on, at most `units_out` (`vorq.completion_tok`). |
+| `rateInCached` | `string \| null` | USD per 1M cached prompt units, as settled (`vorq.rate_in_cached`); `null` when the row carries none. |
 | `fee` | `string` | The protocol fee settlement took on top of `cost`, in USD, from the job row or batch line (`vorq.fee`). Not included in `cost`. |
 | `gasFee` | `string` | The job's gas fee in USD, from the job row or batch line (`vorq.gas_fee`). Not included in `cost`. |
 | `provider` | `number \| string \| null` | The registry id of the provider that settled the job. |
@@ -92,9 +96,7 @@ All three carry these members:
 | --- | --- | --- |
 | `text` | `string` | The generated text, joined from the output items. |
 | `output` | `unknown[]` | The raw output items (or `choices`, for a chat-completion-shaped result). |
-| `usage` | `Record<string, unknown>` | Token usage, as `input_tokens`, `output_tokens`, `total_tokens`. |
-
-`cost` = `(input_tokens × rateIn + output_tokens × rateOut) / 1 000 000`.
+| `usage` | `Record<string, unknown>` | Token usage as the model reported it, as `input_tokens`, `output_tokens`, `total_tokens`. `cost` reads the settled counts, not this. |
 
 ### `MediaResult`
 
@@ -107,21 +109,17 @@ All three carry these members:
 `bytes()` decodes strictly: a frame with no `b64` member, or one that is not valid base64, raises
 `ResultIntegrityError`.
 
-`cost` = delivered pixels (images) or pixel-seconds (video) × `rateOut` / 1 000 000.
-
 ### `EmbeddingResult`
 
 | Member | Type | Meaning |
 | --- | --- | --- |
 | `embeddings` | `Record<string, unknown>[]` | The response's `data` array. |
 | `model` | `string \| null` | The model the provider reported. |
-| `promptTokens` | `number` | Input tokens billed. |
+| `promptTokens` | `number` | Input tokens, as the response reported them. |
 | `bytes()` | `Uint8Array[]` | The vectors decoded from base64, in order. |
 
 `bytes()` needs `encoding_format: "base64"`. For `float` vectors it raises `VorqError`; read
 `.embeddings` directly.
-
-`cost` = `promptTokens × rateIn / 1 000 000`.
 
 ### `JobError`
 

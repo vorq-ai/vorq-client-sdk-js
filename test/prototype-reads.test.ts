@@ -836,10 +836,12 @@ describe("the allowlist — a polluted prototype cannot fabricate an entry", () 
  * into a `MediaResult`, and a polluted `choices` makes `result.text` return
  * attacker-chosen content in place of a confidential inference result.
  */
+/** The settled counts a priced row carries: 11 prompt, 13 completion. */
+const SETTLED = { prompt_tok: 11, cached_tok: 0, completion_tok: 13 };
 const RESULT_JOB = {
   id: "job-1",
   result_cid: "cid",
-  vorq: { rate_in: "3", rate_out: "7", provider_id: 42, gas_fee: "0.03", fee: "0" },
+  vorq: { rate_in: "3", rate_out: "7", provider_id: 42, gas_fee: "0.03", fee: "0", ...SETTLED },
 };
 const RESPONSE_BODY = {
   output: [{ content: [{ type: "output_text", text: "hello" }] }],
@@ -933,7 +935,7 @@ describe("results — the fields each result class reads", () => {
     });
   });
 
-  // Site: `own(usage, "prompt_tokens")` in `embeddingResult` and `embeddingCost`.
+  // Site: `own(usage, "prompt_tokens")` in `embeddingResult`.
   it("reads no prompt token count from the prototype", () => {
     const body = { object: "list", data: [{ embedding: [1] }], usage: {} };
     // Taken **outside** the polluted block on purpose: a baseline computed
@@ -962,24 +964,6 @@ describe("results — the fields each result class reads", () => {
     });
   });
 
-  // Site: `own(video, "duration_secs")` in `mediaResult`.
-  it("reads no video duration from the prototype", () => {
-    const body = { video: { width: 4, height: 4 } };
-    const clean = (baseline(body) as MediaResult).cost;
-    polluted("duration_secs", 9_999, () => {
-      expect((openResult(body) as MediaResult).cost).toBe(clean);
-    });
-  });
-
-  // Site: `own(frame, "width")` / `own(frame, "height")` in `framePixels`.
-  it("reads no frame dimension from the prototype", () => {
-    const body = { images: [{}] };
-    const clean = (baseline(body) as MediaResult).cost;
-    polluted("width", 8, () => {
-      expect((openResult(body) as MediaResult).cost).toBe(clean);
-    });
-  });
-
   // Site: `own(response, "output")` in `textResultFromResponse`.
   it("reads no Responses output list from the prototype", () => {
     polluted("output", [{ content: [{ type: "output_text", text: "injected" }] }], () => {
@@ -990,9 +974,8 @@ describe("results — the fields each result class reads", () => {
   // Site: `own(response, "usage")` in `textResultFromResponse`.
   it("reads no Responses usage block from the prototype", () => {
     const body = { output: [] };
-    const clean = (baseline(body) as TextResult).cost;
     polluted("usage", { input_tokens: 9_999, output_tokens: 9_999 }, () => {
-      expect((openResult(body) as TextResult).cost).toBe(clean);
+      expect(Object.keys((openResult(body) as TextResult).usage)).toEqual([]);
     });
   });
 
@@ -1019,34 +1002,10 @@ describe("results — the fields each result class reads", () => {
     });
   });
 
-  // Sites: `own(usage, "input_tokens")` / `own(usage, "output_tokens")` in `textCost`.
-  //
-  // `textResultFromResponse` hands `textCost` a **spread copy** of the wire's
-  // usage block, and a spread is not a defence: `{ ...record }` copies own
-  // properties into a literal that still inherits from `Object.prototype`, so a
-  // key the copy lacks is still answered by a polluted prototype. Read bare,
-  // this chose the displayed cost of somebody's job on the public
-  // `JobHandle.result()` path.
-  it("reads no input token count from the prototype", () => {
-    const body = { output: [], usage: { output_tokens: 2 } };
-    const clean = (baseline(body) as TextResult).cost;
-    polluted("input_tokens", 9_999_999, () => {
-      expect((openResult(body) as TextResult).cost).toBe(clean);
-    });
-  });
-
-  it("reads no output token count from the prototype", () => {
-    const body = { output: [], usage: { input_tokens: 2 } };
-    const clean = (baseline(body) as TextResult).cost;
-    polluted("output_tokens", 9_999_999, () => {
-      expect((openResult(body) as TextResult).cost).toBe(clean);
-    });
-  });
-
-  it("still costs the token counts the body does carry", () => {
-    // The other direction, so the fix cannot be "stop reading usage": own keys
-    // are still priced. 11 in at rate_in 3 + 13 out at rate_out 7 over 1e6.
-    expect((openResult(RESPONSE_BODY) as TextResult).cost).toBe("0.000124");
+  it("costs the row's settled counts, never the body's usage", () => {
+    // 11 prompt at rate_in 3 + 13 completion at rate_out 7 over 1e6, whatever
+    // the sealed body claims.
+    expect((openResult({ output: [], usage: { input_tokens: 9_999 } }) as TextResult).cost).toBe("0.000124");
   });
 
   // Site: `own(asRecord(choice), "message")` in `textResultFromChatCompletion`.
@@ -1066,18 +1025,16 @@ describe("results — the fields each result class reads", () => {
   // Site: `own(body, "usage")` in `textResultFromChatCompletion`.
   it("reads no chat usage block from the prototype", () => {
     const body = { choices: [] };
-    const clean = (baseline(body) as TextResult).cost;
     polluted("usage", { prompt_tokens: 9_999, completion_tokens: 9_999 }, () => {
-      expect((openResult(body) as TextResult).cost).toBe(clean);
+      expect((openResult(body) as TextResult).usage).toEqual({ input_tokens: 0, output_tokens: 0, total_tokens: 0 });
     });
   });
 
   // Site: `own(rawUsage, "prompt_tokens")` in `textResultFromChatCompletion`.
   it("reads no chat token counts from the prototype", () => {
     const body = { choices: [], usage: {} };
-    const clean = (baseline(body) as TextResult).cost;
     polluted("prompt_tokens", 9_999, () => {
-      expect((openResult(body) as TextResult).cost).toBe(clean);
+      expect((openResult(body) as TextResult).usage.input_tokens).toBe(0);
     });
   });
 });
@@ -1096,10 +1053,32 @@ describe("results — the job row a result is priced and labelled from", () => {
 
   // Site: `own(vorq, "rate_in")` / `own(vorq, "rate_out")` in `resultFromOutput`.
   it("reads no rates from the prototype", () => {
-    const job = { id: "job-1", result_cid: "cid", vorq: { gas_fee: "0.03", fee: "0" } };
+    const job = { id: "job-1", result_cid: "cid", vorq: { gas_fee: "0.03", fee: "0", ...SETTLED } };
     const clean = (openResult(RESPONSE_BODY, job) as TextResult).cost;
     polluted("rate_in", "9999", () => {
       expect((openResult(RESPONSE_BODY, job) as TextResult).cost).toBe(clean);
+    });
+  });
+
+  // Site: `own(vorq, "rate_in_cached")` in `settledOf`.
+  it("reads no cached rate from the prototype", () => {
+    const job = { id: "job-1", result_cid: "cid", vorq: { gas_fee: "0.03", fee: "0", ...SETTLED, cached_tok: 5 } };
+    const clean = (openResult(RESPONSE_BODY, job) as TextResult).cost;
+    polluted("rate_in_cached", "9999", () => {
+      const result = openResult(RESPONSE_BODY, job) as TextResult;
+      expect(result.cost).toBe(clean);
+      expect(result.rateInCached).toBeNull();
+    });
+  });
+
+  // Sites: `own(vorq, "prompt_tok" | "cached_tok" | "completion_tok")` in `settledCount`.
+  it.each(["prompt_tok", "cached_tok", "completion_tok"])("reads no settled %s from the prototype", (field) => {
+    const vorq: Record<string, unknown> = { gas_fee: "0.03", fee: "0", ...SETTLED };
+    delete vorq[field];
+    polluted(field, 1, () => {
+      expect(() => openResult(RESPONSE_BODY, { id: "job-1", result_cid: "cid", vorq })).toThrow(
+        new RegExp(`${field}=undefined`),
+      );
     });
   });
 
@@ -1113,7 +1092,7 @@ describe("results — the job row a result is priced and labelled from", () => {
 
   // Site: `own(vorq, "provider_id")` in `resultFromOutput`.
   it("reads no job provider id from the prototype", () => {
-    const job = { id: "job-1", result_cid: "cid", vorq: { gas_fee: "0.03", fee: "0" } };
+    const job = { id: "job-1", result_cid: "cid", vorq: { gas_fee: "0.03", fee: "0", ...SETTLED } };
     polluted("provider_id", 99, () => {
       expect(openResult(RESPONSE_BODY, job).provider).toBeNull();
     });
@@ -1121,7 +1100,7 @@ describe("results — the job row a result is priced and labelled from", () => {
 
   // Site: `own(job, "id")` in `resultFromOutput`.
   it("reads no job id from the prototype", () => {
-    const job = { result_cid: "cid", vorq: { gas_fee: "0.03", fee: "0" } };
+    const job = { result_cid: "cid", vorq: { gas_fee: "0.03", fee: "0", ...SETTLED } };
     polluted("id", "some-other-job", () => {
       expect(openResult(RESPONSE_BODY, job).jobId).toBeNull();
     });
@@ -1130,7 +1109,7 @@ describe("results — the job row a result is priced and labelled from", () => {
   // Site: `own(output, "vorq")` — the provider's correlation stamp.
   it("reads no correlation stamp from the prototype", () => {
     polluted("vorq", { custom_id: "injected" }, () => {
-      const job = { id: "job-1", result_cid: "cid", vorq: { gas_fee: "0.03", fee: "0" } };
+      const job = { id: "job-1", result_cid: "cid", vorq: { gas_fee: "0.03", fee: "0", ...SETTLED } };
       expect(openResult(RESPONSE_BODY, job).customId).toBeNull();
     });
   });
@@ -1192,7 +1171,7 @@ describe("results — a batch output row", () => {
   // Site: `own(line, "error")` in `resultFromBatchLine`.
   it("reads no error block from the prototype", () => {
     polluted("error", { message: "boom" }, () => {
-      expect(line({ vorq: { result_cid: "cid", gas_fee: "0.03", fee: "0" } })).not.toBeInstanceOf(JobError);
+      expect(line({ vorq: { result_cid: "cid", gas_fee: "0.03", fee: "0", ...SETTLED } })).not.toBeInstanceOf(JobError);
     });
   });
 
@@ -1234,16 +1213,24 @@ describe("results — a batch output row", () => {
   // Site: `own(vorq, "provider")` in the terms `resultFromBatchLine` forwards.
   it("reads no row provider from the prototype", () => {
     polluted("provider", 99, () => {
-      expect((line({ vorq: { result_cid: "cid", gas_fee: "0.03", fee: "0" } }) as TextResult).provider).toBeNull();
+      expect((line({ vorq: { result_cid: "cid", gas_fee: "0.03", fee: "0", ...SETTLED } }) as TextResult).provider).toBeNull();
     });
   });
 
   // Site: `own(vorq, "rate_in")` / `own(vorq, "rate_out")` in the same terms.
   it("reads no row rates from the prototype", () => {
-    const row = { vorq: { result_cid: "cid", gas_fee: "0.03", fee: "0" } };
+    const row = { vorq: { result_cid: "cid", gas_fee: "0.03", fee: "0", ...SETTLED } };
     const clean = (line(row) as TextResult).cost;
     polluted("rate_in", "9999", () => {
       expect((line(row) as TextResult).cost).toBe(clean);
+    });
+  });
+
+  // Sites: the settled counts `resultFromBatchLine` forwards.
+  it("reads no row settled count from the prototype", () => {
+    polluted("completion_tok", 9, () => {
+      expect(() => line({ vorq: { result_cid: "cid", gas_fee: "0.03", fee: "0", prompt_tok: 1, cached_tok: 0 } }))
+        .toThrow(/completion_tok=undefined/);
     });
   });
 
@@ -1416,6 +1403,7 @@ describe("openai-compat — the job row a Response is rendered from", () => {
       cost: "0.0",
       gasFee: "0.03",
       fee: "0",
+      promptTok: 0, cachedTok: 0, completionTok: 0, rateInCached: null,
       provider: 1,
       jobId: "0xabc",
       customId: null,
@@ -1475,6 +1463,7 @@ describe("openai-compat — the job row a Response is rendered from", () => {
       cost: "0.0",
       gasFee: "0.03",
       fee: "0",
+      promptTok: 0, cachedTok: 0, completionTok: 0, rateInCached: null,
       provider: 1,
       jobId: "0xabc",
       customId: null,
@@ -1583,6 +1572,7 @@ describe("openai-compat — the create body and its vorq block", () => {
           cost: "0.0",
           gasFee: "0.03",
           fee: "0",
+          promptTok: 0, cachedTok: 0, completionTok: 0, rateInCached: null,
           provider: 1,
           jobId: "0xjob",
           customId: null,
@@ -1705,7 +1695,7 @@ describe("openai-compat — retrieve and cancel", () => {
   const JOB = `0x${"ab".repeat(32)}`;
   const row = (extra: Record<string, unknown>): Route => [
     /\/v1\/jobs\/[^/?]+$/,
-    () => json({ id: JOB, vorq: { gas_fee: "0.03", fee: "0" }, ...extra }),
+    () => json({ id: JOB, vorq: { gas_fee: "0.03", fee: "0", ...SETTLED }, ...extra }),
   ];
 
   // Site: `own(params, "stream")` in `retrieve`.
@@ -3338,7 +3328,7 @@ describe("jobs — the row a job's result is fetched and judged from", () => {
     // The row **omits** `result_cid` rather than sending `null`: a `null` is
     // an own property and shadows the prototype in both readings, so a test
     // written that way passes with the guard reverted.
-    const j = jobClient({ id: "job_1", status: "completed", vorq: { gas_fee: "0.03", fee: "0" } });
+    const j = jobClient({ id: "job_1", status: "completed", vorq: { gas_fee: "0.03", fee: "0", ...SETTLED } });
     const handle = new JobHandle(j.client, "job_1", ticking);
     await pollutedAsync("result_cid", "evil", async () => {
       await expect(handle.result()).rejects.toThrow(ResultIntegrityError);
@@ -3366,7 +3356,7 @@ describe("jobs — the row a job's result is fetched and judged from", () => {
 
   // Site: `statusOf` at the `=== "completed"` branch in `JobHandle.result`.
   it("settles no job on a status its row never reported", async () => {
-    const j = jobClient({ id: "job_1", result_cid: "real", vorq: { gas_fee: "0.03", fee: "0" } });
+    const j = jobClient({ id: "job_1", result_cid: "real", vorq: { gas_fee: "0.03", fee: "0", ...SETTLED } });
     const handle = new JobHandle(j.client, "job_1", { ...ticking, sla: "1h" });
     await pollutedAsync("status", "completed", async () => {
       // Read bare, the loop ends at once and `settledResult` fetches. Guarded,
@@ -3379,7 +3369,7 @@ describe("jobs — the row a job's result is fetched and judged from", () => {
 
   // Site: `slaSecsOf` in `JobHandle.windowFor`.
   it("refuses no job over an SLA window its row never stated", async () => {
-    const j = jobClient({ id: "job_1", status: "completed", result_cid: "real", vorq: { gas_fee: "0.03", fee: "0" } });
+    const j = jobClient({ id: "job_1", status: "completed", result_cid: "real", vorq: { gas_fee: "0.03", fee: "0", ...SETTLED } });
     const handle = new JobHandle(j.client, "job_1", ticking);
     await pollutedAsync("sla_secs", 0, async () => {
       // Read bare, `windowFor` raises `not a window` for every caller.
@@ -3389,7 +3379,7 @@ describe("jobs — the row a job's result is fetched and judged from", () => {
 
   // Site: `slaSecsOf` in `JobHandle.fetch`.
   it("paces no job by an SLA its row never stated", async () => {
-    const j = jobClient({ id: "job_1", status: "completed", result_cid: "real", vorq: { gas_fee: "0.03", fee: "0" } });
+    const j = jobClient({ id: "job_1", status: "completed", result_cid: "real", vorq: { gas_fee: "0.03", fee: "0", ...SETTLED } });
     const handle = new JobHandle(j.client, "job_1", ticking);
     await pollutedAsync("sla_secs", 1, async () => {
       await handle.result();
@@ -3413,7 +3403,7 @@ describe("jobs — the row a job's result is fetched and judged from", () => {
       }),
     );
     const j = jobClient(
-      { id: "job_1", status: "completed", result_cid: "c", vorq: { gas_fee: "0.03", fee: "0" } },
+      { id: "job_1", status: "completed", result_cid: "c", vorq: { gas_fee: "0.03", fee: "0", ...SETTLED } },
       { cipher: new SealedBoxCipher(RESULT_KEY), fetchBlob: vi.fn(async () => sealed) },
     );
     const handle = polluted("cipher", { publicKey: "00", decrypt: () => { throw new Error("stolen"); } }, () =>
@@ -3441,7 +3431,7 @@ describe("jobs — the row a job's result is fetched and judged from", () => {
 
 describe("results — the bytes a media or embedding result decodes", () => {
   const EVIL = toBase64(new TextEncoder().encode("fabricated"));
-  const jobRow = { id: "job_1", vorq: { rate_in: "0", rate_out: "0", gas_fee: "0.03", fee: "0" } };
+  const jobRow = { id: "job_1", vorq: { rate_in: "0", rate_out: "0", gas_fee: "0.03", fee: "0", ...SETTLED } };
   const bytesOf = (body: unknown) => new TextEncoder().encode(JSON.stringify(body));
 
   // Site: `own(frame, "b64")` in `MediaResult.bytes`.
@@ -3801,7 +3791,7 @@ describe("the environment — an unset variable is answered by the prototype", (
       const href = String(url);
       fetched.push(href);
       if (href.includes("/ipfs/")) return new Response(body, { status: 200 });
-      return json({ id: "job_1", status: "completed", result_cid: "bafyHONEST", vorq: { gas_fee: "0.03", fee: "0" } });
+      return json({ id: "job_1", status: "completed", result_cid: "bafyHONEST", vorq: { gas_fee: "0.03", fee: "0", ...SETTLED } });
     }) as unknown as typeof globalThis.fetch;
     // No `gateway` option, which is the shape the defect lives on: the client
     // falls through to the environment and then to the built-in default.

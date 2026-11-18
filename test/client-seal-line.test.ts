@@ -93,14 +93,14 @@ describe("sealLine / payLine", () => {
     // strings, so nothing else here would tell 2/3 from 3/2. The signature
     // below recovers only over their atomic values, 2 and 3.
     //
-    // `units_in` is the canonical payload's size: `{"input":"hello"}` is 17
-    // bytes and the estimate is `max(1, floor(17 / 4))`. `units_out` is the
+    // `units_in` is the canonical payload's ceiling: `{"input":"hello"}` is 17
+    // bytes. `units_out` is the
     // 4096 default — nothing in this input names a size. `1h` is 3600 seconds,
     // and the catalog publishes `model_id: 7` for "m".
     expect(wire.rate_in).toBe("0.000002");
     expect(wire.rate_out).toBe("0.000003");
     expect(wire.sla_secs).toBe(3600);
-    expect(wire.units_in).toBe(4);
+    expect(wire.units_in).toBe(17);
     expect(wire.units_out).toBe(4096);
     expect(wire.model_id).toBe(7);
     expect(wire.designated).toBe(1); // the named provider, not the open sentinel
@@ -139,13 +139,13 @@ describe("sealLine / payLine", () => {
     //
     //   rates "1" / "2" USD are 1_000_000 / 2_000_000 atomic at 6 decimals
     //   cap = max(1, ceilDiv(rateIn*unitsIn + rateOut*unitsOut, RATE_SCALE))
-    //       = ceilDiv(1_000_000*4 + 2_000_000*4096, 1_000_000)
-    //       = ceilDiv(8_196_000_000, 1_000_000) = 8196
-    //   amount = cap + gasFee = 8196 + 7 atomic = "0.008203" USD
+    //       = ceilDiv(1_000_000*17 + 2_000_000*4096, 1_000_000)
+    //       = ceilDiv(8_209_000_000, 1_000_000) = 8209
+    //   amount = cap + gasFee = 8209 + 7 atomic = "0.008216" USD
     //
-    // Swapping the two rates gives 4104, so this pins their roles as well as
+    // Swapping the two rates gives 4130, so this pins their roles as well as
     // the sum.
-    expect(payment.amount).toBe("0.008203");
+    expect(payment.amount).toBe("0.008216");
 
     // **The token and the payee come from the chain context, never from a
     // quote** — the R6 half of this test's own name, and the half a `typeof

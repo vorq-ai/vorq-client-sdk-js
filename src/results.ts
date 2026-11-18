@@ -3,8 +3,9 @@
  *
  * `handle.result()` normalizes to `TextResult` / `MediaResult` /
  * `EmbeddingResult` values. The API states terms and counts, never totals —
- * `.cost` is computed here, in USD, from the signed rates and the job's unit
- * counts: `units × rate / 1M`, exactly.
+ * `.cost` is computed here, in USD, from the job's settled counts and rates, the
+ * same arithmetic that settles on chain: `(promptTok − cachedTok) × rateIn +
+ * cachedTok × rateInCached + completionTok × rateOut`, over 1M, exactly.
  */
 
 import { fromBase64Strict } from "./crypto/bytes.js";
@@ -82,46 +83,59 @@ function unitCount(value: unknown, fallback: number): bigint {
 }
 
 /**
- * Own properties only, like everything else that reads a usage block.
- *
- * **A spread is not a defence, which is what the comment here used to claim.**
- * `{ ...record }` copies own enumerable properties into an object literal whose
- * prototype is still `Object.prototype`, so a key absent from the copy is still
- * answered by a polluted prototype. `textResultFromResponse` passes exactly such
- * a copy, on the public `JobHandle.result()` path, and a bare read here let
- * `Object.prototype.input_tokens` choose the displayed cost of somebody's job.
- *
- * Guarding inside this function rather than at the two call sites is what
- * retires the exception: neither caller has to be the kind of object this one
- * happens to tolerate.
+ * What the chain settled the job on, off the job row: the backend's own counts,
+ * signed by the provider and clamped on chain (`promptTok ≤ unitsIn`, `cachedTok
+ * ≤ promptTok`, `completionTok ≤ unitsOut`, `rateInCached ≤ rateIn`). A media job
+ * settles `promptTok = unitsIn`, `cachedTok = 0`.
  */
-function textCost(usage: Record<string, unknown>, rates: Rates): string {
-  const inTok = unitCount(own(usage, "input_tokens"), 0);
-  const outTok = unitCount(own(usage, "output_tokens"), 0);
-  return usdCost([inTok, rates.rateIn], [outTok, rates.rateOut]);
+interface Settled {
+  promptTok: number;
+  cachedTok: number;
+  completionTok: number;
+  /** USD per 1M cached prompt units; `null` when the row carries none. */
+  rateInCached: string | null;
+}
+
+function settledCount(vorq: Record<string, unknown>, field: string): number {
+  const value = own(vorq, field);
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new VorqError(
+      `the node sent ${field}=${JSON.stringify(value)}, which is not a settled count`,
+      { type: "api_error" },
+    );
+  }
+  return value;
+}
+
+/** The settled counts a result is costed on: required, never defaulted. */
+function settledOf(vorq: Record<string, unknown>): Settled {
+  const promptTok = settledCount(vorq, "prompt_tok");
+  const cachedTok = settledCount(vorq, "cached_tok");
+  if (cachedTok > promptTok) {
+    throw new VorqError(`the node sent cached_tok=${cachedTok} above prompt_tok=${promptTok}`, {
+      type: "api_error",
+    });
+  }
+  return {
+    promptTok,
+    cachedTok,
+    completionTok: settledCount(vorq, "completion_tok"),
+    rateInCached: asRate(own(vorq, "rate_in_cached"), "rate_in_cached"),
+  };
 }
 
 /**
- * Output pixels (or pixel-seconds) against the signed rate, **divided by
- * RATE_SCALE like every other modality** — `JobRegistry._atomicCharge` has one
- * code path and no media exception: a rate is USD per 1M units of work whatever
- * is being metered. Omitting this divisor displays a figure a million times the
- * charge.
+ * The chain's charge, exactly: uncached prompt at `rateIn`, cached prompt at
+ * `rateInCached`, completion at `rateOut`, over 1M. One formula for every
+ * modality — `JobRegistry` has one code path — so a media job is costed on its
+ * reference units and its delivered pixels alike. An absent rate is zero.
  */
-function mediaCost(units: bigint, rates: Rates): string {
-  return usdCost([units, rates.rateOut]);
-}
-
-/**
- * Input side only, and `rate_out` is deliberately not read: an embeddings
- * backend reports `prompt_tokens` and no completion count, so the job settles at
- * `completionTok == 0` and the chain's charge is `rate_in * units_in`. An
- * input-only ask may still publish a nonzero `rate_out` — it is inert,
- * multiplied by zero units — and reading it here would display a charge nobody
- * was ever billed.
- */
-function embeddingCost(usage: Record<string, unknown>, rates: Rates): string {
-  return usdCost([unitCount(own(usage, "prompt_tokens"), 0), rates.rateIn]);
+function chargeOf(settled: Settled, rates: Rates): string {
+  return usdCost(
+    [BigInt(settled.promptTok - settled.cachedTok), rates.rateIn],
+    [BigInt(settled.cachedTok), settled.rateInCached],
+    [BigInt(settled.completionTok), rates.rateOut],
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +160,14 @@ export class TextResult {
    * `vorq.fee`. `"0"` for a job that did not settle.
    */
   readonly fee: string;
+  /** The backend's own prompt units the chain charged, cached ones included. */
+  readonly promptTok: number;
+  /** The part of `promptTok` the backend served from its cache, billed at `rateInCached`. */
+  readonly cachedTok: number;
+  /** The delivered output units the chain charged. */
+  readonly completionTok: number;
+  /** USD per 1M cached prompt units, as settled; `null` when the row carries none. */
+  readonly rateInCached: string | null;
   readonly provider: number | string | null;
   readonly jobId: string | null;
   /**
@@ -163,6 +185,10 @@ export class TextResult {
     cost: string;
     gasFee: string;
     fee: string;
+    promptTok: number;
+    cachedTok: number;
+    completionTok: number;
+    rateInCached: string | null;
     provider: number | string | null;
     jobId: string | null;
     customId: string | null;
@@ -175,6 +201,10 @@ export class TextResult {
     this.cost = fields.cost;
     this.gasFee = fields.gasFee;
     this.fee = fields.fee;
+    this.promptTok = fields.promptTok;
+    this.cachedTok = fields.cachedTok;
+    this.completionTok = fields.completionTok;
+    this.rateInCached = fields.rateInCached;
     this.provider = fields.provider;
     this.jobId = fields.jobId;
     this.customId = fields.customId;
@@ -198,6 +228,14 @@ export class MediaResult {
    * `vorq.fee`. `"0"` for a job that did not settle.
    */
   readonly fee: string;
+  /** The backend's own prompt units the chain charged, cached ones included. */
+  readonly promptTok: number;
+  /** The part of `promptTok` the backend served from its cache, billed at `rateInCached`. */
+  readonly cachedTok: number;
+  /** The delivered output units the chain charged. */
+  readonly completionTok: number;
+  /** USD per 1M cached prompt units, as settled; `null` when the row carries none. */
+  readonly rateInCached: string | null;
   readonly provider: number | string | null;
   readonly jobId: string | null;
   readonly customId: string | null;
@@ -210,6 +248,10 @@ export class MediaResult {
     cost: string;
     gasFee: string;
     fee: string;
+    promptTok: number;
+    cachedTok: number;
+    completionTok: number;
+    rateInCached: string | null;
     provider: number | string | null;
     jobId: string | null;
     customId: string | null;
@@ -221,6 +263,10 @@ export class MediaResult {
     this.cost = fields.cost;
     this.gasFee = fields.gasFee;
     this.fee = fields.fee;
+    this.promptTok = fields.promptTok;
+    this.cachedTok = fields.cachedTok;
+    this.completionTok = fields.completionTok;
+    this.rateInCached = fields.rateInCached;
     this.provider = fields.provider;
     this.jobId = fields.jobId;
     this.customId = fields.customId;
@@ -297,6 +343,14 @@ export class EmbeddingResult {
    * `vorq.fee`. `"0"` for a job that did not settle.
    */
   readonly fee: string;
+  /** The backend's own prompt units the chain charged, cached ones included. */
+  readonly promptTok: number;
+  /** The part of `promptTok` the backend served from its cache, billed at `rateInCached`. */
+  readonly cachedTok: number;
+  /** The delivered output units the chain charged. */
+  readonly completionTok: number;
+  /** USD per 1M cached prompt units, as settled; `null` when the row carries none. */
+  readonly rateInCached: string | null;
   readonly provider: number | string | null;
   readonly jobId: string | null;
   readonly customId: string | null;
@@ -310,6 +364,10 @@ export class EmbeddingResult {
     cost: string;
     gasFee: string;
     fee: string;
+    promptTok: number;
+    cachedTok: number;
+    completionTok: number;
+    rateInCached: string | null;
     provider: number | string | null;
     jobId: string | null;
     customId: string | null;
@@ -322,6 +380,10 @@ export class EmbeddingResult {
     this.cost = fields.cost;
     this.gasFee = fields.gasFee;
     this.fee = fields.fee;
+    this.promptTok = fields.promptTok;
+    this.cachedTok = fields.cachedTok;
+    this.completionTok = fields.completionTok;
+    this.rateInCached = fields.rateInCached;
     this.provider = fields.provider;
     this.jobId = fields.jobId;
     this.customId = fields.customId;
@@ -428,25 +490,6 @@ function asRate(value: unknown, field: string): string | null {
   return value;
 }
 
-/**
- * One dimension of a frame, defaulting to 1024 to match the coordinator and the
- * provider so the displayed cost tracks the per-pixel rate.
- */
-function dimension(value: unknown): bigint {
-  // `|| 1024` so an explicit `0` falls back too, matching Python's `or 1024`.
-  return unitCount(Number(value ?? 1024) || 1024, 1024);
-}
-
-/**
- * A produced frame's pixels (width × height).
- *
- * Own properties only (see `own.ts`): every record this file reads came out of
- * `JSON.parse` over bytes a provider produced, and a polluted `Object.prototype`
- * would otherwise size a frame nobody delivered.
- */
-const framePixels = (frame: Record<string, unknown>): bigint =>
-  dimension(own(frame, "width")) * dimension(own(frame, "height"));
-
 /** Flatten Responses output items into their text. */
 function flattenResponseOutput(outputItems: unknown[]): string {
   const parts: string[] = [];
@@ -496,8 +539,9 @@ const isMedia = (output: Record<string, unknown>): boolean =>
   Object.hasOwn(output, "images") || Object.hasOwn(output, "video");
 
 /** What every result carries beyond its own body. */
-interface Terms {
+interface Terms extends Settled {
   rates: Rates;
+  cost: string;
   gasFee: string;
   fee: string;
   provider: number | string | null;
@@ -517,43 +561,20 @@ function embeddingResult(output: Record<string, unknown>, terms: Terms): Embeddi
     model: typeof own(output, "model") === "string" ? (own(output, "model") as string) : null,
     promptTokens: Number(unitCount(own(usage, "prompt_tokens"), 0)),
     raw: output,
-    cost: embeddingCost(usage, terms.rates),
     ...terms,
   });
 }
 
 function mediaResult(output: Record<string, unknown>, terms: Terms): MediaResult {
-  let frames: Record<string, unknown>[];
-  let units: bigint;
-  if (Object.hasOwn(output, "images")) {
-    // **Masked by the `Object.hasOwn` one line up**: the key is own or this arm
-    // does not run. The `own` is kept anyway because the pairing is what makes
-    // it true, and nothing enforces the pairing — separate the two and the bare
-    // read is back.
-    frames = asArray(own(output, "images")).map(asRecord);
-    // Output pixels, summed over the delivered images — the image billing unit.
-    units = frames.reduce((total, frame) => total + framePixels(frame), 0n);
-  } else {
-    // **Masked by `isMedia` plus the `images` test above**: reaching this arm
-    // means `isMedia` found one of the two own, and it was not `images`. Both
-    // halves of that argument live in other lines, and neither is enforced.
-    const video = asRecord(own(output, "video"));
-    frames = Object.keys(video).length > 0 ? [video] : [];
-    // Pixel-seconds — the video billing unit.
-    units = framePixels(video) * unitCount(own(video, "duration_secs"), 0);
-  }
-  // The provider's own statement of what settled, when it makes one: frames are
-  // labelled with what was delivered, the order's `units_out` caps the charge,
-  // and a render larger than its cap makes the two differ.
-  const stated = own(output, "units");
-  if (typeof stated === "number" && Number.isSafeInteger(stated) && stated >= 0) {
-    if (BigInt(stated) <= units) units = BigInt(stated);
-  }
+  // **Masked by `isMedia`**: one of the two keys is own or this function does not
+  // run. The `own` reads are kept because nothing enforces that pairing.
+  const frames = Object.hasOwn(output, "images")
+    ? asArray(own(output, "images")).map(asRecord)
+    : [asRecord(own(output, "video"))].filter((video) => Object.keys(video).length > 0);
   return new MediaResult({
     frames,
     seed: typeof own(output, "seed") === "number" ? (own(output, "seed") as number) : null,
     raw: output,
-    cost: mediaCost(units, terms.rates),
     ...terms,
   });
 }
@@ -562,15 +583,13 @@ function textResultFromResponse(response: Record<string, unknown>, terms: Terms)
   const outputItems = asArray(own(response, "output"));
   // The spread is here so `result.usage` is not an alias into `raw` — nothing
   // more. It copies own properties into a literal that still inherits from
-  // `Object.prototype`, so it is not a guard, and `textCost` reads it
-  // own-properties only for that reason.
+  // `Object.prototype`, so it is not a guard.
   const usage = { ...asRecord(own(response, "usage")) };
   return new TextResult({
     text: flattenResponseOutput(outputItems),
     output: outputItems,
     usage,
     raw: response,
-    cost: textCost(usage, terms.rates),
     ...terms,
   });
 }
@@ -588,8 +607,7 @@ function textResultFromChatCompletion(body: Record<string, unknown>, terms: Term
     })
     .join("");
   const rawUsage = asRecord(own(body, "usage"));
-  // Built here from own reads. `textCost` still reads it own-properties only:
-  // an object literal inherits from `Object.prototype` like any other.
+  // Built here from own reads.
   const usage = {
     input_tokens: own(rawUsage, "prompt_tokens") ?? 0,
     output_tokens: own(rawUsage, "completion_tokens") ?? 0,
@@ -600,7 +618,6 @@ function textResultFromChatCompletion(body: Record<string, unknown>, terms: Term
     output: choices,
     usage,
     raw: body,
-    cost: textCost(usage, terms.rates),
     ...terms,
   });
 }
@@ -728,8 +745,11 @@ function resultFromOutput(
       type: "api_error",
     });
   }
+  const settled = settledOf(vorq);
   const terms: Terms = {
     rates,
+    cost: chargeOf(settled, rates),
+    ...settled,
     gasFee,
     fee,
     // `provider_id`, which is what the row carries — `clientJob` projects the
@@ -780,9 +800,9 @@ export function resultFromRaw(
  * is no inline convenience copy, which is what stops sealed bodies being
  * swapped between lines.
  *
- * Each row carries its own line's rates — every line settles under its own
- * signed order — so cost is computed from those and never from a batch-level
- * average.
+ * Each row carries its own line's rates and settled counts — every line
+ * settles under its own signed order — so cost is computed from those and never
+ * from a batch-level average.
  */
 export function resultFromBatchLine(
   line: Record<string, unknown>,
@@ -860,6 +880,10 @@ export function resultFromBatchLine(
       rate_out: own(vorq, "rate_out"),
       gas_fee: own(vorq, "gas_fee"),
       fee: own(vorq, "fee"),
+      prompt_tok: own(vorq, "prompt_tok"),
+      cached_tok: own(vorq, "cached_tok"),
+      completion_tok: own(vorq, "completion_tok"),
+      rate_in_cached: own(vorq, "rate_in_cached"),
       provider_id: own(vorq, "provider"),
     },
   });

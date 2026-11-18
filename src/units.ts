@@ -118,10 +118,13 @@ function countOrOne(value: unknown): number {
  * raw pixels prices a per-image, a per-megapixel and a per-second backend alike,
  * so a bigger image honestly costs more.
  *
- * `unitsIn` is the quantity of input bought, and what that means depends on the
- * **same shape**. Text and embeddings are metered on the prompt, one unit per
- * four bytes of canonical JSON — a proxy, and a coarse one. Image and video are
- * metered on the *reference*: total pixel-seconds across the assets the request
+ * `unitsIn` is the most input the order can be billed for, and what that means
+ * depends on the **same shape**. Text and embeddings get a **ceiling**: the byte
+ * length of the canonical JSON. Text runs about four bytes a token and the JSON
+ * wrapper adds more, so it sits above the backend's prompt count, chat template
+ * included, for anything longer than a few words. Settle bills the backend's own
+ * prompt count under it and refunds the rest. Image and video are metered on the
+ * *reference*: total pixel-seconds across the assets the request
  * carries, and zero when it carries none. A prompt's length buys nothing on a
  * media job, and counting it would price a job by how well its reference
  * happened to compress.
@@ -156,7 +159,7 @@ function declareUnits(
   const kind = shape(input);
   const unitsIn =
     kind === "text"
-      ? Math.max(1, Math.floor(canonicalBytes(input).length / 4))
+      ? canonicalBytes(input).length
       : referenceUnits(input);
   if (unitsOut !== undefined && unitsOut !== null) return { unitsIn, unitsOut };
 

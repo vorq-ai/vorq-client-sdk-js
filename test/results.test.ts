@@ -4,9 +4,16 @@ import { ResultIntegrityError, VorqError } from "../src/errors.js";
 
 const bytes = (o: unknown) => new TextEncoder().encode(JSON.stringify(o));
 
+/** The settled counts a job row carries once the chain has charged it. */
+const counts = (prompt = 0, completion = 0, cached = 0) => ({
+  prompt_tok: prompt, cached_tok: cached, completion_tok: completion,
+});
+
 /**
- * Every cost path is `Σ units × rate`, divided exactly by 1e6: a rate is USD per
- * 1M units of work, so the cost is USD, rendered as its shortest exact decimal.
+ * The cost is the chain's charge off the row's settled counts —
+ * `(prompt_tok − cached_tok) × rate_in + cached_tok × rate_in_cached +
+ * completion_tok × rate_out` — divided exactly by 1e6: a rate is USD per 1M
+ * units of work, so the cost is USD, rendered as its shortest exact decimal.
  */
 describe("cost", () => {
   const job = (rateIn: unknown, rateOut: unknown, extra = {}) => ({
@@ -30,7 +37,7 @@ describe("cost", () => {
       output: [{ content: [{ type: "output_text", text: "hi" }] }],
       usage: { input_tokens: inTok, output_tokens: outTok },
     });
-    const r = resultFromRaw(raw, { ...job(rIn, rOut), result_cid: "c" }, null);
+    const r = resultFromRaw(raw, { ...job(rIn, rOut, counts(inTok, outTok)), result_cid: "c" }, null);
     expect(r.cost).toBe(expected);
   });
 
@@ -39,9 +46,11 @@ describe("cost", () => {
       output: [{ content: [{ type: "output_text", text: "hi" }] }],
       usage: { input_tokens: 1, output_tokens: 1 },
     });
-    expect(resultFromRaw(raw, { ...job("0.05", "0.15"), result_cid: "c" }, null).rates)
+    expect(resultFromRaw(raw, { ...job("0.05", "0.15", counts()), result_cid: "c" }, null).rates)
       .toEqual({ rateIn: "0.05", rateOut: "0.15" });
-    expect(resultFromRaw(raw, { id: "j", result_cid: "c", vorq: { gas_fee: "0.03", fee: "0" } }, null).rates)
+    expect(resultFromRaw(raw, { ...job("0.05", "0.15", counts()), result_cid: "c" }, null).rateInCached)
+      .toBeNull();
+    expect(resultFromRaw(raw, { id: "j", result_cid: "c", vorq: { gas_fee: "0.03", fee: "0", ...counts() } }, null).rates)
       .toEqual({ rateIn: null, rateOut: null });
   });
 
@@ -61,65 +70,86 @@ describe("cost", () => {
     const raw = bytes({
       object: "list", data: [{ embedding: "AAAA" }], usage: { prompt_tokens: promptTok }, model: "m",
     });
-    const r = resultFromRaw(raw, { ...job(rIn, "9990000"), result_cid: "c" }, null);
+    const r = resultFromRaw(raw, { ...job(rIn, "9990000", counts(promptTok)), result_cid: "c" }, null);
     expect(r.cost).toBe(expected);
   });
 
-  it("truncates a non-integer token count rather than throwing a bare RangeError", () => {
-    // `BigInt(1.5)` is a RangeError, which is not a VorqError and would walk
-    // through the one `catch` this module promises over the read path — on a
-    // sealed body, which is exactly the untrusted input it defends against.
-    // A count is a count, so it truncates: 1.5 bills as 1.
-    const raw = bytes({
-      output: [{ content: [{ type: "output_text", text: "hi" }] }],
-      usage: { input_tokens: 1.5, output_tokens: 0 },
-    });
-    const r = resultFromRaw(raw, { ...job("50000", "0"), result_cid: "c" }, null);
-    expect(r.cost).toBe("0.05");
+  it("bills cached prompt units at the cached rate", () => {
+    const raw = bytes({ output: [], usage: { input_tokens: 1000, output_tokens: 500 } });
+    const r = resultFromRaw(
+      raw, { ...job("0.05", "0.15", { ...counts(1000, 500, 400), rate_in_cached: "0.01" }), result_cid: "c" }, null,
+    ) as TextResult;
+    // (600*0.05 + 400*0.01 + 500*0.15)/1e6 = (30 + 4 + 75)/1e6
+    expect(r.cost).toBe("0.000109");
+    expect([r.promptTok, r.cachedTok, r.completionTok]).toEqual([1000, 400, 500]);
+    expect(r.rateInCached).toBe("0.01");
   });
 
-  it("survives a token count that is not a finite number", () => {
-    const raw = bytes({
-      output: [{ content: [{ type: "output_text", text: "hi" }] }],
-      usage: { input_tokens: "many", output_tokens: null },
-    });
-    const r = resultFromRaw(raw, { ...job("50000", "150000"), result_cid: "c" }, null);
-    expect(r.cost).toBe("0");
+  it("bills the backend's own prompt count, not the declared ceiling or the body", () => {
+    // `units_in` is a ceiling; the body's usage is the provider's copy. The row's
+    // settled count is what the chain took.
+    const raw = bytes({ output: [], usage: { input_tokens: 1, output_tokens: 1 } });
+    const r = resultFromRaw(raw, { ...job("1", "0", { units_in: 5000, ...counts(1089) }), result_cid: "c" }, null);
+    expect(r.cost).toBe("0.001089");
+  });
+
+  it.each(["prompt_tok", "cached_tok", "completion_tok"])("refuses a row whose %s is not a settled count", (field) => {
+    const raw = bytes({ output: [], usage: {} });
+    for (const value of [undefined, null, -1, 1.5, "10", true, Number.POSITIVE_INFINITY]) {
+      expect(
+        () => resultFromRaw(raw, { ...job("1", "1", { ...counts(5, 5, 1), [field]: value }), result_cid: "c" }, null),
+        String(value),
+      ).toThrow(new RegExp(`${field}=.*not a settled count`));
+    }
+  });
+
+  it("refuses a cached count above the prompt count", () => {
+    const raw = bytes({ output: [], usage: {} });
+    expect(() => resultFromRaw(raw, { ...job("1", "1", counts(5, 0, 6)), result_cid: "c" }, null))
+      .toThrow(/cached_tok=6 above prompt_tok=5/);
+  });
+
+  it.each([0.01, "1e3", "-1"])("refuses a cached rate that is not a USD string: %s", (rate) => {
+    const raw = bytes({ output: [], usage: {} });
+    expect(() => resultFromRaw(raw, { ...job("1", "1", { ...counts(), rate_in_cached: rate }), result_cid: "c" }, null))
+      .toThrow(/rate_in_cached/);
+  });
+
+  it("bills a media job's reference units at rate_in", () => {
+    const raw = bytes({ images: [{ b64: "", content_type: "image/png", width: 1024, height: 768 }] });
+    const r = resultFromRaw(raw, { ...job("0.01", "0.02", counts(921_600, 786_432)), result_cid: "c" }, null);
+    expect(r.cost).toBe("0.02494464");
   });
 
   it("media unscales by RATE_SCALE like every other modality (R1)", () => {
     // JobRegistry._atomicCharge has one code path and no media exception.
     // 1024x768 px at rate_out "2" USD per 1M px.
     const raw = bytes({ images: [{ b64: "", content_type: "image/png", width: 1024, height: 768 }] });
-    const r = resultFromRaw(raw, { ...job(null, "2"), result_cid: "c" }, null);
+    const r = resultFromRaw(raw, { ...job(null, "2", counts(0, 786_432)), result_cid: "c" }, null);
     expect(r).toBeInstanceOf(MediaResult);
     expect(r.cost).toBe("1.572864");
   });
 
-  it("costs a result on the settled units it states", () => {
+  it("costs a media result on what settled, not on its frames", () => {
     // Frames are labelled with what was delivered and `units_out` caps what is
     // charged. When a render comes back larger than its cap the two differ, and
-    // the charge is the smaller — which only the provider's stamp says.
-    const raw = bytes({
-      images: [{ b64: "", content_type: "image/png", width: 1024, height: 768 }],
-      units: 500000,
-    });
-    const r = resultFromRaw(raw, { ...job(null, "2"), result_cid: "c" }, null);
+    // the charge is the row's settled count — what the chain took.
+    const raw = bytes({ images: [{ b64: "", content_type: "image/png", width: 1024, height: 768 }] });
+    const r = resultFromRaw(raw, { ...job(null, "2", counts(0, 500_000)), result_cid: "c" }, null);
     expect(r.cost).toBe("1");
   });
 
   it("video bills pixel-seconds", () => {
     const raw = bytes({ video: { b64: "", content_type: "video/mp4", width: 1024, height: 1024, duration_secs: 5 }, seed: 7 });
-    const r = resultFromRaw(raw, { ...job(null, "20"), result_cid: "c" }, null);
+    const r = resultFromRaw(raw, { ...job(null, "20", counts(0, 5_242_880)), result_cid: "c" }, null);
     expect(r.cost).toBe("104.8576");
   });
 
   it("embeddings bill the input side only", () => {
     // An input-only ask may still publish a nonzero rate_out — it is inert,
-    // multiplied by zero units — and reading it would display a charge nobody
-    // was ever billed.
+    // multiplied by the zero completion units the job settled at.
     const raw = bytes({ object: "list", data: [{ embedding: "AAAA" }], usage: { prompt_tokens: 10 }, model: "m" });
-    const r = resultFromRaw(raw, { ...job("20000", "9990000"), result_cid: "c" }, null);
+    const r = resultFromRaw(raw, { ...job("20000", "9990000", counts(10)), result_cid: "c" }, null);
     expect(r).toBeInstanceOf(EmbeddingResult);
     expect(r.cost).toBe("0.2");
   });
@@ -180,20 +210,21 @@ describe("openResultBytes", () => {
 describe("gasFee", () => {
   // The row's gas fee, beside `cost` and never inside it. Breaks caught: not
   // surfacing it, reading it from anywhere but the row, and folding it into cost.
-  const row = (gasFee: unknown) => ({
-    id: "j", result_cid: "c", vorq: { rate_in: "50", rate_out: "150", provider_id: 42, gas_fee: gasFee, fee: "0" },
+  const row = (gasFee: unknown, settled: Record<string, number> = counts(1000, 500)) => ({
+    id: "j", result_cid: "c",
+    vorq: { rate_in: "50", rate_out: "150", provider_id: 42, gas_fee: gasFee, fee: "0", ...settled },
   });
-  const bodies: [string, Uint8Array, string][] = [
-    ["text", bytes({ output: [], usage: { input_tokens: 1000, output_tokens: 500 } }), "0.125"],
-    ["media", bytes({ images: [{ b64: "", width: 1000, height: 1000 }] }), "150"],
-    ["embedding", bytes({ object: "list", data: [], usage: { prompt_tokens: 1000 }, model: "m" }), "0.05"],
+  const bodies: [string, Uint8Array, Record<string, number>, string][] = [
+    ["text", bytes({ output: [], usage: { input_tokens: 1000, output_tokens: 500 } }), counts(1000, 500), "0.125"],
+    ["media", bytes({ images: [{ b64: "", width: 1000, height: 1000 }] }), counts(0, 1_000_000), "150"],
+    ["embedding", bytes({ object: "list", data: [], usage: { prompt_tokens: 1000 }, model: "m" }), counts(1000), "0.05"],
   ];
 
-  it.each(bodies)("surfaces the job row's gas fee on a %s result, outside cost", (_kind, raw, cost) => {
-    const r = resultFromRaw(raw, row("0.021"), null);
+  it.each(bodies)("surfaces the job row's gas fee on a %s result, outside cost", (_kind, raw, settled, cost) => {
+    const r = resultFromRaw(raw, row("0.021", settled), null);
     expect(r.gasFee).toBe("0.021");
     expect(r.cost).toBe(cost);
-    expect(resultFromRaw(raw, row("0"), null).cost).toBe(cost);
+    expect(resultFromRaw(raw, row("0", settled), null).cost).toBe(cost);
   });
 
   it.each([1, undefined, null, "1e30", "-1", "$0.03"])("refuses a job row whose gas_fee is %s", (gasFee) => {
@@ -204,7 +235,7 @@ describe("gasFee", () => {
     const line = (gasFee: string) =>
       resultFromBatchLine(
         { id: "row-11", vorq: { job_id: "0x7", result_cid: "bafy", rate_in: "2", rate_out: "3",
-                                provider: 7, gas_fee: gasFee, fee: "0" } },
+                                provider: 7, gas_fee: gasFee, fee: "0", ...counts(10, 20) } },
         null,
         bytes({ output: [], usage: { input_tokens: 10, output_tokens: 20 } }),
       ) as TextResult;
@@ -218,21 +249,22 @@ describe("fee", () => {
   // The protocol fee settlement took, beside `cost` and never inside it. Breaks
   // caught: not surfacing it, recomputing it from the rates, and folding it
   // into cost.
-  const row = (fee: unknown) => ({
-    id: "j", result_cid: "c", vorq: { rate_in: "50", rate_out: "150", provider_id: 42, gas_fee: "0.03", fee },
+  const row = (fee: unknown, settled: Record<string, number> = counts(1000, 500)) => ({
+    id: "j", result_cid: "c",
+    vorq: { rate_in: "50", rate_out: "150", provider_id: 42, gas_fee: "0.03", fee, ...settled },
   });
-  const bodies: [string, Uint8Array, string, string][] = [
-    ["text", bytes({ output: [], usage: { input_tokens: 1000, output_tokens: 500 } }), "0.125", "0.00125"],
-    ["media", bytes({ images: [{ b64: "", width: 1000, height: 1000 }] }), "150", "1.5"],
-    ["embedding", bytes({ object: "list", data: [], usage: { prompt_tokens: 1000 }, model: "m" }), "0.05", "0.0005"],
+  const bodies: [string, Uint8Array, Record<string, number>, string, string][] = [
+    ["text", bytes({ output: [], usage: { input_tokens: 1000, output_tokens: 500 } }), counts(1000, 500), "0.125", "0.00125"],
+    ["media", bytes({ images: [{ b64: "", width: 1000, height: 1000 }] }), counts(0, 1_000_000), "150", "1.5"],
+    ["embedding", bytes({ object: "list", data: [], usage: { prompt_tokens: 1000 }, model: "m" }), counts(1000), "0.05", "0.0005"],
   ];
 
-  it.each(bodies)("surfaces the job row's protocol fee on a %s result, outside cost", (_kind, raw, cost, fee) => {
-    const r = resultFromRaw(raw, row(fee), null);
+  it.each(bodies)("surfaces the job row's protocol fee on a %s result, outside cost", (_kind, raw, settled, cost, fee) => {
+    const r = resultFromRaw(raw, row(fee, settled), null);
     expect(r.fee).toBe(fee);
     expect(r.cost).toBe(cost);
-    expect(resultFromRaw(raw, row("0"), null).fee).toBe("0");
-    expect(resultFromRaw(raw, row("0"), null).cost).toBe(cost);
+    expect(resultFromRaw(raw, row("0", settled), null).fee).toBe("0");
+    expect(resultFromRaw(raw, row("0", settled), null).cost).toBe(cost);
   });
 
   it.each([1, undefined, null, "1e30", "-1", "$0.03"])("refuses a job row whose fee is %s", (fee) => {
@@ -243,7 +275,7 @@ describe("fee", () => {
     const line = (fee: string) =>
       resultFromBatchLine(
         { id: "row-12", vorq: { job_id: "0x8", result_cid: "bafy", rate_in: "2000", rate_out: "3000",
-                                provider: 7, gas_fee: "0.03", fee } },
+                                provider: 7, gas_fee: "0.03", fee, ...counts(10, 20) } },
         null,
         bytes({ output: [], usage: { input_tokens: 10, output_tokens: 20 } }),
       ) as TextResult;
@@ -261,7 +293,7 @@ describe("discriminators and frames", () => {
       usage: { input_tokens: 1, output_tokens: 1 },
       vorq: { custom_id: "mine", job_id: "ignored" },
     });
-    const r = resultFromRaw(raw, { id: "j", result_cid: "c", vorq: { rate_in: "0", rate_out: "0", provider_id: 7, gas_fee: "0.03", fee: "0" } }, null);
+    const r = resultFromRaw(raw, { id: "j", result_cid: "c", vorq: { rate_in: "0", rate_out: "0", provider_id: 7, gas_fee: "0.03", fee: "0", ...counts() } }, null);
     expect(r.customId).toBe("mine");
     expect(r.raw).not.toHaveProperty("vorq");
     expect(r.provider).toBe(7);
@@ -272,7 +304,7 @@ describe("discriminators and frames", () => {
       choices: [{ message: { content: "Paris." } }],
       usage: { prompt_tokens: 18, completion_tokens: 8, total_tokens: 26 },
     });
-    const r = resultFromRaw(raw, { id: "j", result_cid: "c", vorq: { rate_in: "0", rate_out: "0", gas_fee: "0.03", fee: "0" } }, null);
+    const r = resultFromRaw(raw, { id: "j", result_cid: "c", vorq: { rate_in: "0", rate_out: "0", gas_fee: "0.03", fee: "0", ...counts() } }, null);
     expect(r).toBeInstanceOf(TextResult);
     expect((r as TextResult).text).toBe("Paris.");
     expect((r as TextResult).usage).toEqual({ input_tokens: 18, output_tokens: 8, total_tokens: 26 });
@@ -283,7 +315,7 @@ describe("discriminators and frames", () => {
     // declare 1024x768, seal garbage, and hand back a perfectly good zero-byte
     // image that download() then wrote to disk.
     const raw = bytes({ images: [{ b64: "###", content_type: "image/png" }] });
-    const r = resultFromRaw(raw, { id: "j", result_cid: "c", vorq: { rate_out: "0", gas_fee: "0.03", fee: "0" } }, null) as MediaResult;
+    const r = resultFromRaw(raw, { id: "j", result_cid: "c", vorq: { rate_out: "0", gas_fee: "0.03", fee: "0", ...counts() } }, null) as MediaResult;
     expect(() => r.bytes()).toThrow(ResultIntegrityError);
   });
 
@@ -292,13 +324,13 @@ describe("discriminators and frames", () => {
     // did not come from one; guessing which non-alphabet characters were meant
     // to be ignored is the guess that produced the empty frame.
     const raw = bytes({ images: [{ b64: "AA AA", content_type: "image/png" }] });
-    const r = resultFromRaw(raw, { id: "j", result_cid: "c", vorq: { rate_out: "0", gas_fee: "0.03", fee: "0" } }, null) as MediaResult;
+    const r = resultFromRaw(raw, { id: "j", result_cid: "c", vorq: { rate_out: "0", gas_fee: "0.03", fee: "0", ...counts() } }, null) as MediaResult;
     expect(() => r.bytes()).toThrow(ResultIntegrityError);
   });
 
   it("refuses a frame carrying no b64 member", () => {
     const raw = bytes({ images: [{ content_type: "image/png" }] });
-    const r = resultFromRaw(raw, { id: "j", result_cid: "c", vorq: { rate_out: "0", gas_fee: "0.03", fee: "0" } }, null) as MediaResult;
+    const r = resultFromRaw(raw, { id: "j", result_cid: "c", vorq: { rate_out: "0", gas_fee: "0.03", fee: "0", ...counts() } }, null) as MediaResult;
     expect(() => r.bytes()).toThrow(ResultIntegrityError);
   });
 });
@@ -375,7 +407,7 @@ describe("resultFromBatchLine", () => {
     // which would render "0" instead of (10*2 + 20*3)/1e6.
     const parsed = resultFromBatchLine(
       { id: "row-4", vorq: { job_id: "0xdef", result_cid: "bafy", rate_in: "2",
-                             rate_out: "3", provider: 7, gas_fee: "0.03", fee: "0" } },
+                             rate_out: "3", provider: 7, gas_fee: "0.03", fee: "0", ...counts(10, 20) } },
       null, textBody("hi"),
     );
     expect(parsed).toBeInstanceOf(TextResult);
@@ -383,6 +415,18 @@ describe("resultFromBatchLine", () => {
     expect((parsed as TextResult).provider).toBe(7);
     expect((parsed as TextResult).jobId).toBe("0xdef");
     expect((parsed as TextResult).cost).toBe("0.00008");
+    expect((parsed as TextResult).completionTok).toBe(20);
+  });
+
+  it("carries the row's cached count and cached rate into the cost", () => {
+    const parsed = resultFromBatchLine(
+      { id: "row-4c", vorq: { job_id: "0xdef", result_cid: "bafy", rate_in: "2", rate_out: "3",
+                              rate_in_cached: "1", provider: 7, gas_fee: "0.03", fee: "0", ...counts(10, 20, 4) } },
+      null, textBody("hi"),
+    ) as TextResult;
+    // (6*2 + 4*1 + 20*3)/1e6
+    expect(parsed.cost).toBe("0.000076");
+    expect([parsed.promptTok, parsed.cachedTok, parsed.rateInCached]).toEqual([10, 4, "1"]);
   });
 
   it("reads only the named bytes, never an inline body on the row", () => {
@@ -391,7 +435,7 @@ describe("resultFromBatchLine", () => {
     // an implementation that "helpfully" falls back to a row-carried copy, which
     // is the one way a sealed body could be swapped between lines.
     const parsed = resultFromBatchLine(
-      { id: "row-6", vorq: { job_id: "0x2", result_cid: "bafy", rate_in: "0", rate_out: "0", gas_fee: "0.03", fee: "0" },
+      { id: "row-6", vorq: { job_id: "0x2", result_cid: "bafy", rate_in: "0", rate_out: "0", gas_fee: "0.03", fee: "0", ...counts() },
         response: { status_code: 200, body: {
           output: [{ content: [{ type: "output_text", text: "swapped" }] }],
           usage: { input_tokens: 0, output_tokens: 0 },
@@ -447,7 +491,7 @@ describe("resultFromBatchLine", () => {
 
   it("refuses a success row whose gas_fee is not a USD string", () => {
     // Break caught: defaulting the gas fee, which is money this line's claim took.
-    const ok = { job_id: "0x6", result_cid: "bafy", rate_in: "0", rate_out: "0", gas_fee: "0.03", fee: "0" };
+    const ok = { job_id: "0x6", result_cid: "bafy", rate_in: "0", rate_out: "0", gas_fee: "0.03", fee: "0", ...counts() };
     const parse = (vorq: Record<string, unknown>) =>
       resultFromBatchLine({ id: "row-10", vorq }, null, textBody("hi"));
     expect(parse(ok)).toBeInstanceOf(TextResult);
@@ -460,7 +504,7 @@ describe("resultFromBatchLine", () => {
   it("refuses a success row whose fee is not a USD string", () => {
     // Break caught: defaulting the protocol fee, which is money this line's
     // settlement took.
-    const ok = { job_id: "0x6", result_cid: "bafy", rate_in: "0", rate_out: "0", gas_fee: "0.03", fee: "0" };
+    const ok = { job_id: "0x6", result_cid: "bafy", rate_in: "0", rate_out: "0", gas_fee: "0.03", fee: "0", ...counts() };
     const parse = (vorq: Record<string, unknown>) =>
       resultFromBatchLine({ id: "row-10", vorq }, null, textBody("hi"));
     expect(parse(ok)).toBeInstanceOf(TextResult);

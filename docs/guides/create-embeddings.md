@@ -38,8 +38,8 @@ if (result instanceof EmbeddingResult) {
 - `.embeddings` is the response's `data` array, as returned.
 - `.bytes()` decodes vectors requested with `encoding_format: "base64"`. For `float` output it
   raises; read `.embeddings` directly.
-- `.cost` is `promptTokens × rateIn ÷ 1 000 000` in USD; an embedding has no
-  output charge.
+- `.cost` is the job's settled prompt units at `rateIn` (any cached ones at `rateInCached`)
+  ÷ 1 000 000, in USD; an embedding settles at `completionTok` 0 and has no output charge.
 
 ## In a batch
 
