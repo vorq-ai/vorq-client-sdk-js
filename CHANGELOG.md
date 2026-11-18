@@ -16,7 +16,7 @@ Every release bumps the patch version (`0.2.0`, `0.2.1`, …), so the `^0.2.0` r
 `npm install` records picks up each one. A breaking change bumps the minor (`0.3.0`), which a
 `^0.2.x` range does not take.
 
-## [Unreleased]
+## [0.2.2] — 2026-11-18
 
 ### Changed
 
