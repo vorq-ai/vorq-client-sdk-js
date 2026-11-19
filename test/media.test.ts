@@ -53,9 +53,35 @@ describe("the shared cases", () => {
       "reference-clip",
       "plain-text-is-untouched",
       "an-explicit-zero-output-survives",
+      "an-image-by-url-is-priced-as-an-image",
+      "an-image-at-any-depth-counts",
     ]) {
       expect(names, required).toContain(required);
     }
+  });
+});
+
+describe("images in a text request", () => {
+  const url = { type: "image_url", image_url: { url: "https://example.com/a.png" } };
+  const chat = (...parts: unknown[]) => ({
+    messages: [{ role: "user", content: parts }],
+    max_tokens: 8,
+  });
+
+  it("adds one image ceiling on top of the bytes", () => {
+    const bare = declareUnits(chat({ type: "text", text: "x" })).unitsIn;
+    const one = declareUnits(chat({ type: "text", text: "x" }, url)).unitsIn;
+    expect(one - bare - JSON.stringify(url).length - 1).toBe(MEDIA_UNITS.textImages.units_each);
+  });
+
+  it.each([...MEDIA_UNITS.textImages.refused_types])("refuses a %s part", (kind) => {
+    expect(() => declareUnits(chat({ type: kind, [kind]: { data: "AA==" } }))).toThrow(kind);
+  });
+
+  it("refuses more images than the cap", () => {
+    const most = MEDIA_UNITS.caps.text_images;
+    declareUnits(chat(...Array(most).fill(url)));
+    expect(() => declareUnits(chat(...Array(most + 1).fill(url)))).toThrow(ValidationError);
   });
 });
 

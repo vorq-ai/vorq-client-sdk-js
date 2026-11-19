@@ -62,6 +62,9 @@ describe("the media billing table", () => {
     expect(raw.clip_keys).toEqual([...MEDIA_UNITS.clipKeys]);
     expect(raw.audio_keys).toEqual([...MEDIA_UNITS.audioKeys]);
     expect(raw.caps.reference_audio_bytes).toBe(MEDIA_UNITS.caps.reference_audio_bytes);
+    // Images in a text request.
+    expect(raw.text_images).toEqual(MEDIA_UNITS.textImages);
+    expect(raw.caps.text_images).toBe(MEDIA_UNITS.caps.text_images);
   });
 
   it("names every resolution for every aspect ratio", () => {

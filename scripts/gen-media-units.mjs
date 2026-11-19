@@ -46,6 +46,7 @@ const shipped = {
   clipKeys: table.clip_keys,
   audioKeys: table.audio_keys,
   outputCeilingKeys: table.output_ceiling_keys,
+  textImages: table.text_images,
   frames: table.frames,
 };
 

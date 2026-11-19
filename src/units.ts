@@ -9,7 +9,14 @@
 
 import { toBase64 } from "./crypto/bytes.js";
 import { ValidationError } from "./errors.js";
-import { durationSecs, framePixels, referenceUnits, shape } from "./media.js";
+import {
+  durationSecs,
+  framePixels,
+  referenceUnits,
+  shape,
+  TEXT_IMAGE_UNITS,
+  textImageCount,
+} from "./media.js";
 import { MEDIA_UNITS } from "./media-units.js";
 import { own } from "./own.js";
 
@@ -123,7 +130,9 @@ function countOrOne(value: unknown): number {
  * length of the canonical JSON. Text runs about four bytes a token and the JSON
  * wrapper adds more, so it sits above the backend's prompt count, chat template
  * included, for anything longer than a few words. Settle bills the backend's own
- * prompt count under it and refunds the rest. Image and video are metered on the
+ * prompt count under it and refunds the rest. Each image part adds
+ * `TEXT_IMAGE_UNITS` on top, inline or by URL: an image's token count has no
+ * relation to its bytes (`textImageCount` in `media.ts`). Image and video are metered on the
  * *reference*: total pixel-seconds across the assets the request
  * carries, and zero when it carries none. A prompt's length buys nothing on a
  * media job, and counting it would price a job by how well its reference
@@ -159,7 +168,7 @@ function declareUnits(
   const kind = shape(input);
   const unitsIn =
     kind === "text"
-      ? canonicalBytes(input).length
+      ? canonicalBytes(input).length + TEXT_IMAGE_UNITS * textImageCount(input)
       : referenceUnits(input);
   if (unitsOut !== undefined && unitsOut !== null) return { unitsIn, unitsOut };
 

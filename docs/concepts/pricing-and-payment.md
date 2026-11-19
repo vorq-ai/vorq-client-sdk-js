@@ -52,7 +52,8 @@ before sealing:
 
 - **`units_in`**: the most input the job may bill. For text and embeddings, the byte length of
   the canonical JSON input: a ceiling that sits above the model's own prompt count, chat
-  template included, for anything but a few-word prompt. For image and video, the reference
+  template included, for anything but a few-word prompt. Each image part adds 32,768, inline
+  or by URL, since an image's token count has nothing to do with its bytes. For image and video, the reference
   assets you attach, in pixel-seconds.
 - **`units_out`**: the most output the job may bill. For text, the output-token ceiling you set;
   for images, pixels per image times the image count; for video, frame pixels times seconds.

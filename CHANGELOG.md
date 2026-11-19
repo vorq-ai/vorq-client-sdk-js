@@ -16,6 +16,14 @@ Every release bumps the patch version (`0.2.0`, `0.2.1`, …), so the `^0.2.0` r
 `npm install` records picks up each one. A breaking change bumps the minor (`0.3.0`), which a
 `^0.2.x` range does not take.
 
+## [0.3.1] — 2026-11-19
+
+### Changed
+
+- An image in a text request adds 32,768 to `units_in`, inline or by URL, so the order covers
+  the model's image tokens. A text request carrying audio, video or file parts, or more than 64
+  images, raises `ValidationError` before signing.
+
 ## [0.3.0] — 2026-11-19
 
 ### Changed

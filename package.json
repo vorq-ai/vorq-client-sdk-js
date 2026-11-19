@@ -1,6 +1,6 @@
 {
   "name": "@vorq-ai/client-sdk",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "JavaScript and TypeScript client for the VORQ inference exchange",
   "license": "Apache-2.0",
   "type": "module",

@@ -22,7 +22,8 @@ export const MEDIA_UNITS = {
     "reference_pixels": 8294400,
     "reference_assets": 12,
     "reference_duration_s": 60,
-    "reference_audio_bytes": 15728640
+    "reference_audio_bytes": 15728640,
+    "text_images": 64
   },
   "resolutions": [
     "480p",
@@ -63,6 +64,21 @@ export const MEDIA_UNITS = {
     "max_tokens",
     "max_completion_tokens"
   ],
+  "textImages": {
+    "units_each": 32768,
+    "types": [
+      "image_url",
+      "input_image"
+    ],
+    "refused_types": [
+      "input_audio",
+      "audio_url",
+      "video_url",
+      "input_video",
+      "file",
+      "input_file"
+    ]
+  },
   "frames": {
     "21:9": {
       "480p": [

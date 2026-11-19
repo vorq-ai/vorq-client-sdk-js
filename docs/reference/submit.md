@@ -172,6 +172,12 @@ else raises `ValidationError`.
 - Text and embeddings: the byte length of the input's canonical JSON in UTF-8. It is a ceiling
   that sits above the model's own prompt count for anything but a few-word prompt; settlement
   bills the model's count and refunds the unused part.
+- Images in a text request: every object at any depth whose `type` is `image_url` or
+  `input_image` adds 32,768, inline or by URL. That is a ceiling on one image's prompt tokens,
+  above the largest vision encoder served; settlement bills the model's count. At most 64
+  images; a part of type `input_audio`, `audio_url`, `video_url`, `input_video`, `file` or
+  `input_file` raises `ValidationError` before anything is signed. A provider re-counts after
+  decrypting and hands back an order whose `units_in` is short.
 - Image and video: the reference assets in pixel-seconds, `width × height × max(1,
   duration_secs)` summed over the assets (a still counts as one second), `0` with none.
 

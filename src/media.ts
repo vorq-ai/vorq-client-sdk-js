@@ -50,6 +50,7 @@ const {
   clipKeys: CLIP_KEYS,
   audioKeys: AUDIO_KEYS,
   outputCeilingKeys: OUTPUT_CEILING_KEYS,
+  textImages: TEXT_IMAGES,
 } = MEDIA_UNITS;
 
 type Aspect = keyof typeof frames;
@@ -333,6 +334,47 @@ export function durationSecs(input: Record<string, unknown>): number {
 
 /** A duration written as a string: ASCII digits and nothing else. */
 const WHOLE_SECONDS = /^[0-9]{1,9}$/;
+
+/** Each image part of a text request adds this many input units. */
+export const TEXT_IMAGE_UNITS: number = TEXT_IMAGES.units_each;
+
+const IMAGE_TYPES: readonly string[] = TEXT_IMAGES.types;
+const REFUSED_TYPES: readonly string[] = TEXT_IMAGES.refused_types;
+
+/**
+ * The image parts a text request carries, each priced at `TEXT_IMAGE_UNITS`.
+ *
+ * Every object at any depth whose `type` is an image type counts, inline or by
+ * URL: the provider re-counts the same way after decryption, so there is no
+ * place to put an image that one side sees and the other does not. The walk
+ * reads what `canonicalJson` seals — own enumerable keys — so it counts the
+ * payload that is signed. Media nothing prices yet (sound, video, files) is
+ * refused, as is a request past the cap.
+ */
+export function textImageCount(input: unknown): number {
+  let count = 0;
+  const stack: unknown[] = [input];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (Array.isArray(node)) {
+      stack.push(...node);
+    } else if (node !== null && typeof node === "object") {
+      const record = node as Record<string, unknown>;
+      const kind = own(record, "type");
+      if (typeof kind === "string") {
+        if (REFUSED_TYPES.includes(kind)) {
+          throw invalid(`a '${kind}' part is not supported: only text and images are priced`);
+        }
+        if (IMAGE_TYPES.includes(kind)) count += 1;
+      }
+      for (const key of Object.keys(record)) stack.push(record[key]);
+    }
+  }
+  if (count > caps.text_images) {
+    throw invalid(`the request carries ${count} images; at most ${caps.text_images} are priced`);
+  }
+  return count;
+}
 
 /**
  * `"text"`, `"image"` or `"video"` — **one** decision, driving both units.
