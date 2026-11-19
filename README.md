@@ -15,8 +15,12 @@ you hold. The coordinator sees routing terms and ciphertext, never a prompt or a
 - Browser wallets over EIP-6963 (`BrowserWalletSigner`) and local keys for Node
   (`PrivateKeySigner`).
 - Result key derived from the wallet (`deriveResultCipher`): one key to hold and back up.
-- Prices and amounts are USD decimal strings (rates in USD per 1M units); payment by EIP-3009
-  authorization in the deployment's USDC token; costs computed locally as exact decimals.
+- Prices and amounts are USD decimal strings (rates in USD per 1M units); jobs are paid from a
+  prepaid USDC balance, topped up by gasless EIP-3009 deposits and withdrawable at any time;
+  costs computed locally as exact decimals.
+- `client.balance()`, `client.deposit(amount)`, `client.withdraw(amount)`; `submit` deposits a
+  shortfall itself unless the client is built with `autoDeposit: false`, which raises
+  `InsufficientBalance` instead.
 - Durable jobs: persist the id, re-attach later with `client.job(id)`.
 - Sealed batches (`client.batches`).
 - `sealingFetch`: use the stock `openai` package's Responses API over the sealed flow.
@@ -55,7 +59,10 @@ if (result instanceof TextResult) console.log(result.text, result.cost);
 
 Use a dedicated wallet funded with your inference budget, never a main wallet's key.
 VORQ runs on Base: fund the wallet with USDC on Base (buy or withdraw it to the Base network,
-or bridge it). No ETH is needed.
+or bridge it). No ETH is needed: deposits into the prepaid balance are gasless signatures the
+coordinator relays. The first `submit` deposits what the job needs (plus a flat deposit fee);
+`client.deposit("10")` tops up ahead of time and `client.withdraw(amount)` takes the balance
+back.
 
 ## Documentation
 

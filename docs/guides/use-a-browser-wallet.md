@@ -3,7 +3,7 @@ title: Use a browser wallet
 description: Discover the user's wallets, connect one, and submit jobs from a web page.
 ---
 
-In a browser the user's own wallet signs and pays. Everything on the package's main entry runs
+In a browser the user's own wallet signs, and pays from its prepaid balance. Everything on the package's main entry runs
 unchanged in the page; only the signer differs from Node.
 
 ## Discover and connect
@@ -32,7 +32,7 @@ console.log(signer.address, signer.info.name);
 
 ## Switch to the right chain
 
-The session handshake, every order and every payment are EIP-712 typed data bound to the
+The session handshake, every order and every deposit are EIP-712 typed data bound to the
 deployment's chain id. Wallets generally refuse to sign typed data for a chain other than the one
 they are switched to, and the SDK does not switch networks for you. Read the chain id from the
 coordinator and switch first:
@@ -66,6 +66,28 @@ result key from it. The same wallet always derives the same key, so results stay
 reload or on another device, and there is nothing else to store. See
 [Sealing and keys](../concepts/sealing-and-keys.md#the-result-key).
 
+## Let the user fund the balance
+
+By default `submit` tops up a short balance by itself, which adds a deposit prompt to that
+submission. An app that wants the user to deposit explicitly builds the client with
+`autoDeposit: false` and offers a deposit when a submission comes back short:
+
+```ts
+import { InsufficientBalance } from "@vorq-ai/client-sdk";
+
+const client = new Client({ baseUrl, signer, cipher, autoDeposit: false });
+try {
+  await client.submit({ model, input });
+} catch (error) {
+  if (!(error instanceof InsufficientBalance)) throw error;
+  // error.balance, error.required, error.shortfall: USD strings for the UI
+  await client.deposit(error.shortfall);   // on the user's click
+}
+```
+
+`client.balance()` reads `available` for a balance display, and `client.withdraw(amount)` sends
+it back to the wallet.
+
 ## What the user is asked to sign
 
 | When | Prompt |
@@ -73,7 +95,9 @@ reload or on another device, and there is nothing else to store. See
 | `BrowserWalletSigner.from()` | Connect (`eth_requestAccounts`). |
 | `deriveResultCipher()` | `personal_sign` over a fixed message, on every call. |
 | The first request that needs a session | `VorqSession` typed data (the login handshake). Repeated when the session expires. |
-| Each `submit` | `Order` typed data, then `ReceiveWithAuthorization` typed data (the payment). A gas-fee re-quote asks for the payment signature again. |
+| Each `submit` | `Order` typed data; when the balance is short, `ReceiveWithAuthorization` typed data too (the deposit). A re-quote that names a new deposit asks for one more. |
+| `client.deposit(amount)` | `ReceiveWithAuthorization` typed data (the deposit). |
+| `client.withdraw(amount)` | `Withdraw` typed data. |
 | Each `handle.cancel()` | `Cancel` typed data. |
 
 Any prompt the user dismisses raises `WalletRejectedError` and sends nothing further.

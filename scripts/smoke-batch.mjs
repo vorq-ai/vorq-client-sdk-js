@@ -29,7 +29,7 @@
  *
  * The defaults deliberately mirror `e2e/client_e2e.py`'s `run_batch` line for
  * line — same prompt, same `max_output_tokens`, same `custom_id` scheme. The
- * cross-SDK comparison is on `units_in`, `units_out` and the authorized `amount`,
+ * cross-SDK comparison is on `units_in`, `units_out` and the locked `amount`,
  * and all three are functions of the request body: two SDKs fed different bodies
  * would differ for a reason that says nothing about either.
  */
@@ -96,12 +96,12 @@ const lines = Array.from({ length: lineCount }, (_, i) => ({
 
 // The JSONL rows the SDK actually uploads. `payLine` is where a line stops being
 // a sealed order and becomes a paid one, so wrapping it is the only place the
-// signed terms, the container and the authorized amount are all in hand at once
+// signed terms, the container and the locked amount are all in hand at once
 // — and this is a *tap*, not a reimplementation: the row recorded is the row sent.
 const sentRows = [];
 const payLine = client.payLine.bind(client);
-client.payLine = async (line, gasFee, ctx, feeBps) => {
-  const row = await payLine(line, gasFee, ctx, feeBps);
+client.payLine = (line, gasFee, ctx, feeBps) => {
+  const row = payLine(line, gasFee, ctx, feeBps);
   sentRows.push({ row, gasFee: formatUsd(gasFee, ctx.decimals) });
   return row;
 };
@@ -119,7 +119,7 @@ const sealedDump = sentRows.map(({ row, gasFee }, i) => ({
   index: i,
   url: row.url,
   // A row is **flat** — the signed order's own fields, the container beside
-  // them, and the payment. There is no `vorq` envelope and no `payment` block.
+  // them, and the locked amount. There is no `vorq` envelope and no `payment` block.
   c: row.c,
   owner: row.owner,
   job_id: row.job_id,
@@ -133,7 +133,6 @@ const sealedDump = sentRows.map(({ row, gasFee }, i) => ({
   expires_at: Number(row.expires_at),
   order_sig: row.signature,
   container_b64_len: row.container.length,
-  auth_sig: row.auth_sig,
   amount: row.amount,
   gas_fee: gasFee,
 }));

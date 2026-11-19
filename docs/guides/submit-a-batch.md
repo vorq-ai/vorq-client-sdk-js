@@ -20,7 +20,7 @@ const requests = prompts.map((prompt, i) => ({
 
 `max_rate_in` on a line protects it from being overcharged: the line never signs an input rate
 above it, and pays less when its provider asks less. It is worth setting on every batch,
-because a batch signs and pays for all of its lines in one call, before you see what any of
+because a batch signs and funds all of its lines in one call, before you see what any of
 them was priced at. It caps the input side only; add `max_rate_out` to cap the output side too.
 Set it too low and no provider matches: the line [rests](../reference/submit.md#how-the-rates-are-chosen) and may expire without being
 served.

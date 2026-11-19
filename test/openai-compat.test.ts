@@ -1033,7 +1033,7 @@ describe("sealingFetch — create, retrieve and cancel", () => {
             if (options.submitStatus !== undefined) return wire(options.submitStatus);
             const order = body as { job_id: string; expires_at: number };
             const jobId = order.job_id;
-            if (n === 1) return json(QUOTE(jobId, BigInt(order.expires_at)), 402);
+            if (n === 1) return json(QUOTE(), 402);
             if (options.unreadableReceipt === true) {
               return new Response("<html>gateway</html>", {
                 status: 201,

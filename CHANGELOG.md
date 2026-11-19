@@ -16,6 +16,38 @@ Every release bumps the patch version (`0.2.0`, `0.2.1`, …), so the `^0.2.0` r
 `npm install` records picks up each one. A breaking change bumps the minor (`0.3.0`), which a
 `^0.2.x` range does not take.
 
+## [0.3.0] — 2026-11-19
+
+### Changed
+
+- **Breaking:** jobs are paid from a prepaid balance held by the JobRegistry. A submission no
+  longer signs a payment: the complete `POST /v1/jobs` sends `amount` (what the job locks at
+  claim) and no `auth_sig`. The `402`/`409` quote carries `amount`, `balance`, `deposit` and
+  `deposit_fee` (USD strings) and no `authorization` block; a quote whose non-zero `deposit` is
+  not above `deposit_fee` or is above `amount + deposit_fee` is refused.
+- **Breaking:** when the quote's `deposit` is above zero, `submit` first signs one gasless
+  deposit authorization for exactly that value and sends it to `POST /v1/deposits`; a `409`
+  re-quote does the same inside the existing attempt cap. The wallet never needs ETH.
+- **Breaking:** batch lines carry `amount` and no `auth_sig`. Before the file is uploaded the
+  lines' summed lock is checked against `balance()` and any shortfall is deposited once.
+  `payLine` is synchronous and signs nothing.
+- **Breaking:** `Signer.signPaymentAuthorization` is replaced by
+  `signDepositAuthorization(amount, nonce, validBefore, ctx)` (random 32-byte nonce, one-hour
+  deadline when the client signs it).
+
+### Added
+
+- `ClientOptions.autoDeposit` (default `true`). With `false`, a short balance raises
+  `InsufficientBalance` (`balance`, `required`, `shortfall` as USD strings, `type`
+  `insufficient_balance`) before anything is posted or uploaded.
+- `client.balance()` (`GET /v1/balance`), `client.deposit(amount)` (`POST /v1/deposits`, signs
+  `amount` plus the deposit fee) and `client.withdraw(amount)` (`POST /v1/withdrawals`), each
+  answering a `Balance`: `owner`, `balance`, `reserved`, `available`, `depositFee`.
+- `Signer.signWithdraw(amount, issuedAt, ctx)` over `Withdraw(uint128 amount,uint64 issuedAt)`
+  on the JobRegistry's domain.
+- `VorqError.code` (`string | null`), the wire `error.code`. A withdrawal over `available` is a
+  `StateConflictError` with `code` `insufficient_balance`.
+
 ## [0.2.3] — 2026-11-18
 
 ### Added

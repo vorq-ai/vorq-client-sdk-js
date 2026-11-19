@@ -7,6 +7,8 @@ import {
   ChainContext,
   OrderTerms,
   RECEIVE_AUTHORIZATION_TYPES,
+  WITHDRAW_TYPES,
+  orderDomain,
   sessionDomain,
   SESSION_TYPES,
   paymentDomain,
@@ -194,19 +196,14 @@ describe("the three chain-bound methods", () => {
     expect(await signer.signOrderV2(terms, CTX)).toBe(await signer.signOrderV2(terms, CTX));
   });
 
-  it("derives the payment's payee, window and nonce, taking only the amount", async () => {
-    // The caller names an amount, a job and an expiry; everything else — who may
-    // execute the transfer, from whom, and under which token's domain — is the
-    // context's. Recovery against a message built from `CTX` is what says so: a
-    // signature over any other payee is valid and belongs to a stranger.
+  it("signs a deposit to the context's JobRegistry under the token's domain", async () => {
+    // The caller names the value, the nonce and the deadline; who may execute
+    // the transfer, from whom, and under which token's domain is the context's.
+    // Recovery against a message built from `CTX` is what says so: a signature
+    // over any other payee is valid and belongs to a stranger.
     const signer = new PrivateKeySigner(KEY);
-    const jobId = `0x${"33".repeat(32)}` as const;
-    const signature = await signer.signPaymentAuthorization({
-      amount: 210n,
-      jobId,
-      expiresAt: 1_800_003_600n,
-      ctx: CTX,
-    });
+    const nonce = `0x${"33".repeat(32)}` as const;
+    const signature = await signer.signDepositAuthorization(2_210n, nonce, 1_800_003_600n, CTX);
     const recoverTo = (to: `0x${string}`) =>
       recoverTypedDataAddress({
         domain: paymentDomain(CTX),
@@ -215,17 +212,29 @@ describe("the three chain-bound methods", () => {
         message: {
           from: signer.address,
           to,
-          value: 210n,
+          value: 2_210n,
           validAfter: 0n,
-          // The token requires `now < validBefore`, and a claim may land exactly
-          // on `expiresAt`, so the window is the order's plus one second.
-          validBefore: 1_800_003_601n,
-          nonce: jobId,
+          validBefore: 1_800_003_600n,
+          nonce,
         },
         signature,
       });
     expect(await recoverTo(CTX.jobRegistry)).toBe(ADDRESS);
     expect(await recoverTo(CTX.usdc)).not.toBe(ADDRESS);
+  });
+
+  it("signs a withdrawal over Withdraw(amount, issuedAt) on the JobRegistry's domain", async () => {
+    const signer = new PrivateKeySigner(KEY);
+    const signature = await signer.signWithdraw(5_000_000n, 1_800_000_000n, CTX);
+    const recovered = await recoverTypedDataAddress({
+      domain: orderDomain(CTX),
+      types: WITHDRAW_TYPES,
+      primaryType: "Withdraw",
+      message: { amount: 5_000_000n, issuedAt: 1_800_000_000n },
+      signature,
+    });
+    expect(recovered).toBe(ADDRESS);
+    expect(await signer.signWithdraw(5_000_000n, 1_800_000_001n, CTX)).not.toBe(signature);
   });
 
   it("signs a cancel over the issuedAt it was given, not a fresh clock", async () => {

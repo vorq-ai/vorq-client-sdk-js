@@ -13,6 +13,7 @@ import {
   ORDER_TYPES,
   OrderTerms,
   RECEIVE_AUTHORIZATION_TYPES,
+  WITHDRAW_TYPES,
   sessionDomain,
   SESSION_TYPES,
 } from "../src/terms.js";
@@ -373,12 +374,12 @@ describe("the chain-bound prompts", () => {
     const { provider, sent } = recordingProvider();
     const signer = await BrowserWalletSigner.from({ ...WALLET_A, provider });
     const m = message("payment-authorization");
-    await signer.signPaymentAuthorization({
-      amount: m.value as bigint,
-      jobId: m.nonce as `0x${string}`,
-      expiresAt: (m.validBefore as bigint) - 1n,
-      ctx: CTX,
-    });
+    await signer.signDepositAuthorization(
+      m.value as bigint,
+      m.nonce as `0x${string}`,
+      m.validBefore as bigint,
+      CTX,
+    );
 
     const typed = typedSent(sent());
     // A missing `version` here is well formed and silently fatal: it changes the
@@ -399,6 +400,19 @@ describe("the chain-bound prompts", () => {
       validBefore: String(m.validBefore),
       nonce: m.nonce,
     });
+  });
+
+  it("sends the Withdraw struct under the JobRegistry's domain", async () => {
+    const { provider, sent } = recordingProvider();
+    const signer = await BrowserWalletSigner.from({ ...WALLET_A, provider });
+    await signer.signWithdraw(1_250_000n, 1_800_000_000n, CTX);
+
+    const typed = typedSent(sent());
+    expect(typed.domain).toEqual(CASES.cancel!.typed_data.domain);
+    expect(typed.primaryType).toBe("Withdraw");
+    expect(typed.types.Withdraw).toEqual(WITHDRAW_TYPES.Withdraw);
+    // `uint128` and `uint64`: both go out as decimal strings.
+    expect(typed.message).toEqual({ amount: "1250000", issuedAt: "1800000000" });
   });
 
   it("wraps a 4001 rejection on an order prompt too", async () => {

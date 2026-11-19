@@ -8,7 +8,7 @@
  */
 export { Client, mintSessionToken } from "./client.js";
 export type {
-  Allowlist, AllowlistEntry, Ask, AskBook, ClientJob, ClientOptions, EscrowKeyAnnouncement,
+  Allowlist, AllowlistEntry, Ask, AskBook, Balance, ClientJob, ClientOptions, EscrowKeyAnnouncement,
   EvmJob, JobBook, JobQuery, JobsSummary, JobsSummaryModel, PagedListing,
   ProviderRecord, SealedLine, SealLineArgs, SealMemo, SubmitArgs, VorqFile,
 } from "./client.js";
@@ -59,7 +59,7 @@ export type { SealingFetch, SealingFetchOptions } from "./openai-compat.js";
 
 // The full error taxonomy. Every one of these is catchable and nameable.
 export {
-  AuthenticationError, BatchFailed, EscrowKeyUnverified, JobFailed, NotFoundError,
+  AuthenticationError, BatchFailed, EscrowKeyUnverified, InsufficientBalance, JobFailed, NotFoundError,
   ResultIntegrityError, StateConflictError, TransportError, ValidationError,
   VerificationError, VorqError, WaitTimeout,
 } from "./errors.js";

@@ -20,7 +20,7 @@ Client.fromSessionToken(token: string, options?: ClientOptions)
 | Option | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `baseUrl` | `string` | `"https://api.vorq.co"` | The coordinator origin. Trailing slashes are stripped. |
-| `signer` | `Signer` | Node: a `PrivateKeySigner` over `$VORQ_WALLET_KEY` when it is set | The wallet. Signs the session handshake, every order, every payment authorization and every cancel. Required to submit or cancel. |
+| `signer` | `Signer` | Node: a `PrivateKeySigner` over `$VORQ_WALLET_KEY` when it is set | The wallet. Signs the session handshake, every order, every deposit, withdrawal and cancel. Required to submit, cancel or touch the balance. |
 | `cipher` | `Cipher` | derived from the signer | Opens results; its public key is sealed into every submission. Without one, the client derives it from the signer on first use (`deriveResultCipher`: one wallet signature). |
 | `sessionToken` | `string` | — | A pre-minted `vorq_sess_…` token, used as-is. Same as `Client.fromSessionToken`. |
 | `verifier` | `Verifier \| null` | `null` | Attestation checks. Required for open orders and `confidential: true`. See [Verifier](./verifier.md). |
@@ -29,6 +29,7 @@ Client.fromSessionToken(token: string, options?: ClientOptions)
 | `maxRetries` | `number` | `3` | Cap on automatic retries per request. |
 | `timeoutMs` | `number` | `900000` (15 min) | Per-request HTTP timeout. It bounds one network call, not how long a job takes. |
 | `clock` | `() => number` | wall clock, seconds | Time source for the escrow-key cache. |
+| `autoDeposit` | `boolean` | `true` | Deposit the quoted shortfall before posting a job or uploading a batch. `false` raises [`InsufficientBalance`](./errors.md#insufficientbalance) instead. See [The prepaid balance](#the-prepaid-balance). |
 
 Every option is optional. A client with neither `signer` nor `sessionToken` can still make the
 unauthenticated reads (models, chain and market data).
@@ -37,12 +38,13 @@ unauthenticated reads (models, chain and market data).
 
 | Member | Meaning |
 | --- | --- |
-| `baseUrl`, `signer`, `cipher`, `verifier` | As constructed (`null` when not given). |
+| `baseUrl`, `signer`, `cipher`, `verifier`, `autoDeposit` | As constructed (`null` when not given). |
 | `sessionToken` | The current token, or `null`. |
 | `models` | [Models](./models.md). |
 | `batches` | [Batches](./batches.md). |
 | `submit(args)` | Submit a job. See [Submit](./submit.md). |
 | `job(jobId)` | A `JobHandle` for a stored id, no network call. See [Jobs and results](./jobs-and-results.md). |
+| `balance()`, `deposit(amount)`, `withdraw(amount)` | See [The prepaid balance](#the-prepaid-balance). |
 | `chainContext()`, `asks()`, `jobs()`, `jobsSummary()`, `evmJob()`, `providers()`, `allowlist()`, `escrowKey()` | See [Chain and market reads](./chain-and-market.md). |
 | `uploadFile()`, `file()`, `fileContent()` | See [Files](#files). |
 | `fetchBlob(cid)` | See [Reading result bytes](#reading-result-bytes). |
@@ -69,12 +71,43 @@ mintSessionToken({ signer, baseUrl?, fetch? }): Promise<string>
 Runs the handshake once and returns the token, for pointing another HTTP client at the
 coordinator. `baseUrl` defaults to `"https://api.vorq.co"`.
 
+## The prepaid balance
+
+```ts
+client.balance(): Promise<Balance>
+client.deposit(amount: string): Promise<Balance>
+client.withdraw(amount: string): Promise<Balance>
+```
+
+Jobs are paid from a balance the JobRegistry holds for the signer's wallet; see
+[Pricing and payment](../concepts/pricing-and-payment.md#the-prepaid-balance). All three need a
+signer and answer the balance after the call.
+
+- `balance()` is `GET /v1/balance?owner=<signer>`.
+- `deposit(amount)` credits `amount`, a USD decimal string above `"0"`. It reads the deposit fee
+  from `balance()`, signs one EIP-3009 deposit authorization for `amount` plus that fee (random
+  nonce, valid for one hour) and sends it to `POST /v1/deposits`, which relays it. Gasless: the
+  wallet needs USDC and no ETH.
+- `withdraw(amount)` signs `Withdraw(amount, issuedAt)` and sends it to `POST /v1/withdrawals`.
+  More than `available` is refused with a `409` (`StateConflictError`, `code`
+  `insufficient_balance`).
+
+Deposits and withdrawals are never retried. `Balance`:
+
+| Member | Type | Meaning |
+| --- | --- | --- |
+| `owner` | `string` | The wallet. |
+| `balance` | `string` | USD the JobRegistry holds for the wallet. |
+| `reserved` | `string` | USD your open orders will lock when claimed. |
+| `available` | `string` | `balance − reserved`: what a submission or a withdrawal can use. |
+| `depositFee` | `string` | USD taken from each deposit. |
+
 ## Retry policy
 
 - A request is retried **only** when the response carries `x-vorq-retryable: true`, up to
   `maxRetries` times, with backoff `0.5 · 2^attempt + uniform(0, 0.25)` seconds.
-- **Requests that create something are never retried**: job submissions, file uploads, batch
-  creation and batch cancel. A job cancel follows the normal policy, since a job cannot be
+- **Requests that create something are never retried**: job submissions, deposits,
+  withdrawals, file uploads, batch creation and batch cancel. A job cancel follows the normal policy, since a job cannot be
   cancelled twice.
 - **Network failures are never retried.** A request that never became a response raises
   `TransportError`. (A submission reconciles a dropped connection itself; see

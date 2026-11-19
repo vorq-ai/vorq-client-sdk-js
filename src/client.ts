@@ -8,7 +8,8 @@
 
 import type { Hex } from "viem";
 
-import { ChainContext, OrderTerms, capFor, parseCeiling, parseRate, paymentDomain } from "./terms.js";
+import { ChainContext, OrderTerms, UINT128_MAX, capFor, parseCeiling, parseRate } from "./terms.js";
+import { toHex } from "./crypto/bytes.js";
 // A value import, and the reason `batches.ts` may only import from here with
 // `import type`: two runtime imports would be a real module cycle.
 import { Batches, once } from "./batches.js";
@@ -21,6 +22,7 @@ import type { Verifier } from "./verify.js";
 import { Transport, type TransportHooks } from "./transport.js";
 import {
   EscrowKeyUnverified,
+  InsufficientBalance,
   TransportError,
   ValidationError,
   VerificationError,
@@ -89,10 +91,9 @@ function envValue(name: string): string | undefined {
 }
 
 /**
- * How far past the SLA window the payment authorization stays valid.
+ * How far past the SLA window an order stays claimable.
  *
- * The authorization must outlive the work, so a long `batch` (24h) order does
- * not expire before `/settle`. Configurable through `$VORQ_SETTLEMENT_MARGIN`
+ * Configurable through `$VORQ_SETTLEMENT_MARGIN`
  * (seconds); anything that is not a whole number of seconds leaves the default
  * in place rather than becoming a `NaN` that would travel into an order's
  * `expiresAt`.
@@ -215,7 +216,33 @@ export interface ClientOptions {
    * advance it; the verifier keeps its own clocks and is not affected by this.
    */
   clock?: () => number;
+  /**
+   * Top the prepaid balance up when a submission needs more than it holds.
+   * Default `true`: one gasless deposit authorization for exactly the quoted
+   * shortfall plus the deposit fee, then the job. `false` raises
+   * `InsufficientBalance` instead, before anything is posted.
+   */
+  autoDeposit?: boolean;
 }
+
+/**
+ * `GET /v1/balance`: the owner's prepaid balance, in USD decimal strings.
+ *
+ * `balance` is what the JobRegistry holds for the owner, `reserved` what the
+ * owner's open orders will lock when claimed, and `available` the difference —
+ * what a new submission or a withdrawal can use. `depositFee` is taken from each
+ * deposit.
+ */
+export interface Balance {
+  owner: string;
+  balance: string;
+  reserved: string;
+  available: string;
+  depositFee: string;
+}
+
+/** How long a deposit authorization stays valid, in seconds. */
+const DEPOSIT_VALID_SECONDS = 3600;
 
 export interface Ask {
   providerId: number;
@@ -287,9 +314,10 @@ export interface JobQuery {
  */
 export type EvmJob = Record<string, unknown> & {
   /**
-   * The flat relay gas fee snapshotted at post, in USD. Pulled at claim beside
-   * the cap and its protocol fee; kept by the treasury on settle, provider fail
-   * and reclaim. A job that ended while open paid nothing.
+   * The flat relay gas fee fixed at claim, in USD. Locked from the prepaid
+   * balance at claim beside the cap and its protocol fee; kept by the treasury
+   * on settle, provider fail and reclaim. A job that ended while open paid
+   * nothing.
    */
   gas_fee: string;
   /**
@@ -598,6 +626,8 @@ export class Client {
    * per-submission one would re-read chain state on every order.
    */
   readonly verifier: Verifier | null;
+  /** Whether a short balance is topped up by a deposit (`true`) or raises `InsufficientBalance`. */
+  readonly autoDeposit: boolean;
   readonly models: Models;
   readonly batches: Batches;
 
@@ -619,6 +649,11 @@ export class Client {
   private escrowKeyExpiresAt = 0;
   /** Wall clock for the escrow key cache, in seconds. */
   private readonly escrowClock: () => number;
+  /**
+   * The last `issuedAt` this client signed a withdrawal with: the contract takes
+   * only a strictly later one per owner, so two in one second differ.
+   */
+  private lastWithdrawIssuedAt = 0n;
 
   constructor(options: ClientOptions = {}) {
     // **Own properties only on the caller's options record** (`own.ts`), and a
@@ -633,6 +668,7 @@ export class Client {
     this.signer = opt("signer") ?? envWalletSigner();
     this.cipherValue = opt("cipher") ?? null;
     this.verifier = opt("verifier") ?? null;
+    this.autoDeposit = opt("autoDeposit") ?? true;
     this.escrowClock = opt("clock") ?? wallNow;
     this.fetchImpl = opt("fetch") ?? globalThis.fetch.bind(globalThis);
     this.gateway = resolveGateway(opt("gateway"));
@@ -1110,6 +1146,116 @@ export class Client {
     };
   }
 
+  // -- the prepaid balance -------------------------------------------------------
+
+  /** `GET /v1/balance` — the signer's prepaid balance. */
+  async balance(): Promise<Balance> {
+    const owner = this.wallet().address;
+    return balanceFrom(
+      "GET /v1/balance",
+      await this.transport.json<unknown>("GET", "/v1/balance", { params: { owner } }),
+    );
+  }
+
+  /**
+   * Deposit into the prepaid balance — gasless: one EIP-3009 authorization the
+   * coordinator relays, so the wallet needs no ETH.
+   *
+   * `amount` is the USD decimal string credited. The authorization is signed for
+   * `amount` plus the deposit fee, read from `balance()`. Answers the balance
+   * after the deposit.
+   */
+  async deposit(amount: string): Promise<Balance> {
+    this.wallet();
+    const ctx = await this.chainContext();
+    const credited = parseUsd(amount, ctx.decimals);
+    if (credited === 0n) {
+      throw new ValidationError("a deposit credits more than 0", { type: "invalid_request_error" });
+    }
+    const fee = parseUsd((await this.balance()).depositFee, ctx.decimals);
+    return this.depositValue(credited + fee, ctx);
+  }
+
+  /**
+   * Withdraw `amount` (a USD decimal string) from the prepaid balance to the
+   * wallet. Signed by the owner, relayed by the coordinator; the coordinator
+   * refuses more than `available`. Answers the balance after the withdrawal.
+   */
+  async withdraw(amount: string): Promise<Balance> {
+    const signer = this.wallet();
+    const ctx = await this.chainContext();
+    const atomic = parseUsd(amount, ctx.decimals);
+    if (atomic === 0n || atomic > UINT128_MAX) {
+      throw new ValidationError(`a withdrawal is more than 0 and fits a uint128, got ${amount}`, {
+        type: "invalid_request_error",
+      });
+    }
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    const issuedAt = now > this.lastWithdrawIssuedAt ? now : this.lastWithdrawIssuedAt + 1n;
+    this.lastWithdrawIssuedAt = issuedAt;
+    const signature = await signer.signWithdraw(atomic, issuedAt, ctx);
+    return balanceFrom(
+      "POST /v1/withdrawals",
+      await this.transport.json<unknown>("POST", "/v1/withdrawals", {
+        json: {
+          owner: signer.address,
+          amount: formatUsd(atomic, ctx.decimals),
+          issued_at: Number(issuedAt),
+          signature,
+        },
+        retry: false,
+      }),
+    );
+  }
+
+  /**
+   * Sign one deposit authorization for exactly `value` atomic units — what the
+   * token moves, deposit fee included — and relay it through `POST /v1/deposits`.
+   */
+  private async depositValue(value: bigint, ctx: ChainContext): Promise<Balance> {
+    const signer = this.wallet();
+    const nonce: Hex = `0x${toHex(crypto.getRandomValues(new Uint8Array(32)))}`;
+    const validBefore = BigInt(Math.floor(Date.now() / 1000) + DEPOSIT_VALID_SECONDS);
+    const authSig = await signer.signDepositAuthorization(value, nonce, validBefore, ctx);
+    return balanceFrom(
+      "POST /v1/deposits",
+      await this.transport.json<unknown>("POST", "/v1/deposits", {
+        json: {
+          owner: signer.address,
+          value: formatUsd(value, ctx.decimals),
+          valid_before: Number(validBefore),
+          nonce,
+          auth_sig: authSig,
+        },
+        retry: false,
+      }),
+    );
+  }
+
+  /**
+   * Cover a quote's deposit before its job is posted: deposit exactly what it
+   * names, or — with `autoDeposit: false` — raise `InsufficientBalance`.
+   */
+  private async cover(quote: Quote, ctx: ChainContext): Promise<void> {
+    if (quote.deposit === 0n) return;
+    if (!this.autoDeposit) {
+      throw insufficient(quote.balance, quote.amount, quote.deposit - quote.depositFee, ctx.decimals);
+    }
+    await this.depositValue(quote.deposit, ctx);
+  }
+
+  /** The signer the balance routes act for. */
+  private wallet(): Signer {
+    if (this.signer === null) {
+      throw new ValidationError(
+        "the prepaid balance belongs to a wallet: set $VORQ_WALLET_KEY or pass a signer " +
+          "(new Client({ signer }))",
+        { type: "invalid_request_error" },
+      );
+    }
+    return this.signer;
+  }
+
   // -- submission ---------------------------------------------------------------
 
   /**
@@ -1119,13 +1265,14 @@ export class Client {
    * model-owned input, sent verbatim.
    *
    * Submissions are always sealed, so a `signer` and a `cipher` are both
-   * required. It takes exactly two requests. The first carries the terms and
-   * nothing else and comes back a `402` with the payment requirements. The
-   * client then seals the payload into **one container v1** — the bulk under a
-   * DEK derived from a fresh 32-byte seed, and the **seed** sealed to the chosen
-   * provider — signs the order over that container's commitment and the payment
-   * authorization, and posts terms and bytes together. **The container crosses
-   * the wire once.**
+   * required. The payload is sealed into **one container v1** — the bulk under
+   * a DEK derived from a fresh 32-byte seed, and the **seed** sealed to the
+   * chosen provider — and the order is signed over that container's
+   * commitment. The first request carries the signed terms and nothing else and
+   * comes back a `402` quote: what the job locks from the prepaid balance, and
+   * what to deposit first when the balance is short. The client deposits that
+   * (or, built with `autoDeposit: false`, raises `InsufficientBalance`), then
+   * posts terms and bytes together. **The container crosses the wire once.**
    *
    * Two orders take a `verifier`, and a client built without one refuses both
    * before anything is posted: an **open** order (no `provider`), whose payload
@@ -1134,7 +1281,7 @@ export class Client {
    */
   async submit(args: SubmitArgs): Promise<JobHandle> {
     await this.resultCipher();
-    const { signer } = this.sealing();
+    this.sealing();
     // Before any request: a confidential submission that cannot verify anything
     // must not reach the network at all.
     //
@@ -1245,7 +1392,7 @@ export class Client {
       allowStatuses: [402],
     });
     // A terms-only body has exactly one answer, and it is the quote. The node
-    // returns `402` unconditionally when `auth_sig` is absent, and a success here
+    // returns `402` unconditionally when the container is absent, and a success here
     // would mean a job posted with **no container**, which names no task and is
     // refused on chain as `EmptyTaskCid`. So a non-402 is not a shortcut, it is a
     // server this client does not know.
@@ -1271,7 +1418,7 @@ export class Client {
       // and produces the same "no quote to sign" refusal it would for a 402
       // that was honest JSON with nothing useful in it.
     }
-    let quote = this.quoteFrom(challengeBody, jobId, ctx, line.terms.expiresAt);
+    let quote = this.quoteFrom(challengeBody, ctx);
 
     // -- the container: inline, or uploaded once ahead of the post -----------
     //
@@ -1281,15 +1428,15 @@ export class Client {
     // **Resolved once, on first use, and never on a re-quote.** Memoised rather
     // than computed here because *when* the bytes are filed decides how much of
     // the node's 300 s orphan window a submission spends before it can attach
-    // them. Filing ahead of `signPaymentAuthorization` spends that window on a
-    // wallet prompt — in a browser, a dialog waiting on a person who may have
-    // changed tabs — and an upload the sweep collects is a post refused
-    // `unknown_container`, which the node marks not retryable. The payment does
-    // not depend on the container, so signing first costs nothing and a caller
-    // who declines the prompt never uploads at all.
+    // them. Filing ahead of a deposit spends that window on a wallet prompt —
+    // in a browser, a dialog waiting on a person who may have changed tabs —
+    // and an upload the sweep collects is a post refused `unknown_container`,
+    // which the node marks not retryable. The deposit does not depend on the
+    // container, so depositing first costs nothing and a caller who declines
+    // the prompt never uploads at all.
     //
     // The memo is what keeps it out of the attempt loop: a `409` re-quote
-    // re-signs the payment and re-sends the reference, never the payload.
+    // re-sends the reference, never the payload.
     let containerField: Record<string, unknown> | null = null;
     const container = async (): Promise<Record<string, unknown>> => {
       if (containerField !== null) return containerField;
@@ -1318,24 +1465,18 @@ export class Client {
     // The container is on this request and never on a challenge, so a `402`
     // answered to it is a protocol violation rather than a loop to run. The one
     // status that legitimately sends a complete submission back is a `409`
-    // carrying a `quote` — the gas fee drifted — and it arrives in the `402`'s
-    // own body shape, which is why "sign this quote" is one code path here
-    // whatever status delivered it. **The two `409`s are told apart by body and
-    // never by status.**
+    // carrying a `quote` — the gas fee drifted, or the balance fell short — and
+    // it arrives in the `402`'s own body shape, which is why "cover this quote"
+    // is one code path here whatever status delivered it. **The two `409`s are
+    // told apart by body and never by status.**
     for (let attempt = 0; attempt < MAX_SUBMIT_ATTEMPTS; attempt += 1) {
-      // The payment first, the container second — see the memo above. Spelled as
-      // two statements rather than one object literal, because the order of
+      // The deposit first, the container second — see the memo above. Spelled
+      // as two statements rather than one object literal, because the order of
       // effects is the point and property order would not enforce it.
-      const authSig = await signer.signPaymentAuthorization({
-        amount: quote.amount,
-        jobId,
-        expiresAt: line.terms.expiresAt,
-        ctx,
-      });
+      await this.cover(quote, ctx);
       const body: Record<string, unknown> = {
         ...order,
         ...(await container()),
-        auth_sig: authSig,
         amount: formatUsd(quote.amount, ctx.decimals),
       };
       const sent = await this.sendComplete(body, jobId);
@@ -1365,8 +1506,8 @@ export class Client {
         if (typeof refusal === "object" && refusal !== null && Object.hasOwn(refusal, "quote")) {
           // Not a challenge: a refusal with the remedy attached. The terms and
           // `c` are unchanged, so the container is reused verbatim above and
-          // only the payment is re-signed.
-          quote = this.quoteFrom(refusal, jobId, ctx, line.terms.expiresAt);
+          // only the amount — and any deposit it now needs — is new.
+          quote = this.quoteFrom(refusal, ctx);
           continue;
         }
         throw errorFromWire(sent.status, refusal, {
@@ -1386,7 +1527,7 @@ export class Client {
     }
     throw new VorqError(
       `the node re-quoted this submission ${MAX_SUBMIT_ATTEMPTS} times without accepting ` +
-        "it; the gas fee is drifting faster than the order can be signed, so the " +
+        "it; the quote is drifting faster than the order can be posted, so the " +
         "container is not uploaded again",
       { type: "api_error", statusCode: 409 },
     );
@@ -1461,7 +1602,7 @@ export class Client {
   }
 
   /**
-   * Authorize one sealed line and render the JSONL row.
+   * Price one sealed line and render the JSONL row.
    *
    * Separate from the sealing because the two need different things: sealing
    * needs a recipient key and produces the commitment the order signs, and this
@@ -1470,33 +1611,29 @@ export class Client {
    * fees after sealing and then re-sealed would mint a fresh seed, a fresh `c`
    * and a fresh job id for every line it had already paid to encrypt.
    *
-   * **The token and the payee come from the chain context, never from a quote**
-   * (R6). Every member of this authorization is client-derivable except `gasFee`
-   * and `feeBps`, and deriving the rest is what keeps a node from naming what a
-   * signature authorizes.
+   * `amount` is what the line locks from the prepaid balance at claim: the cap
+   * its terms sign, the protocol fee on it, and the gas fee. Nothing is signed
+   * here.
    *
    * Public for the reason `sealLine` above is, and the same advice applies:
    * prefer `submit` for a job and `batches.submit` for a file, and reach for
    * this only when assembling a batch by hand.
    */
-  async payLine(
+  payLine(
     line: SealedLine,
     gasFee: bigint,
     ctx: ChainContext,
     feeBps: bigint,
-  ): Promise<Record<string, unknown>> {
-    const { signer } = this.sealing();
+  ): Record<string, unknown> {
     // **Own properties only on the sealed line** (`own.ts`). `payLine` is a
     // public `Client` member and `SealedLine` is on the package barrel, so this
     // record can arrive from a caller; it is applied here rather than because
     // any in-SDK path reaches it: `batches.ts` always passes a full `sealLine`
     // result, every key of which is own. `terms` is the sharp one —
-    // `capFor(terms)` is the cap half of `amount`, which is the **value** this
-    // line authorizes, and `terms.expiresAt` is the window it is valid in.
+    // `capFor(terms)` is the cap half of `amount`.
     const stated = <K extends keyof SealedLine>(key: K): SealedLine[K] =>
       own(line as unknown as Record<string, unknown>, key) as SealedLine[K];
-    const terms = stated("terms");
-    const cap = capFor(terms);
+    const cap = capFor(stated("terms"));
     // the protocol fee rides on top of the cap, floored as the chain floors it
     const amount = cap + (cap * feeBps) / 10000n + gasFee;
     // Flat, exactly the `POST /v1/jobs` fields — a line is one submission —
@@ -1505,12 +1642,6 @@ export class Client {
       url: stated("url"),
       ...stated("order"),
       container: toBase64(stated("container")),
-      auth_sig: await signer.signPaymentAuthorization({
-        amount,
-        jobId: stated("jobId"),
-        expiresAt: terms.expiresAt,
-        ctx,
-      }),
       amount: formatUsd(amount, ctx.decimals),
     };
   }
@@ -1530,8 +1661,7 @@ export class Client {
    * `expiresAt`, even `task_cid`, whose mint is content-addressed — is public
    * calldata a front-runner copies verbatim out of the mempool. A server
    * comparing those columns would hand an attacker's job row back to this client
-   * as its own, complete with a `job_id`, a `task_cid` and a `tx_hash`, for a job
-   * whose `authSig` is garbage and which no provider can ever claim. That is
+   * as its own, complete with a `job_id`, a `task_cid` and a `tx_hash`. That is
    * strictly worse than the refusal it would replace.
    *
    * What makes the client side sound is the one thing the server does not have:
@@ -1958,8 +2088,7 @@ export class Client {
   /**
    * When the order stops being postable, clamped to the chain's own ceiling.
    *
-   * The payment authorization must outlive the work, so the SLA window plus
-   * `SETTLEMENT_MARGIN_SECONDS` is the wanted value — but `JobRegistry` refuses
+   * The SLA window plus `SETTLEMENT_MARGIN_SECONDS` is the wanted value — but `JobRegistry` refuses
    * anything past `now + 86400` and the `24h` window already reaches it.
    * Clamping here is what keeps the ordinary long-window submission from being a
    * `400` at the door.
@@ -1972,81 +2101,58 @@ export class Client {
   }
 
   /**
-   * Read a `402`/`409` quote, refusing one that is not about this job.
+   * Read a `402`/`409` quote: what the job locks (`amount`), the owner's
+   * available `balance`, and the `deposit` to make first, which is `0` when the
+   * balance covers the job and otherwise the shortfall plus `deposit_fee`.
    *
-   * **This client signs what it derives; the quote supplies the amount and
-   * nothing else.** The quoted `authorization` block is still read member for
-   * member and has to agree: a node that describes a different authorization
-   * than the one this client is about to sign is a node on another deployment,
-   * and signing anyway would produce an unclaimable job rather than a refusal.
-   *
-   * `amount` is a USD string, parsed at the token's `decimals`; the block's
-   * `value` is the atomic integer the signature covers, and the two must be the
-   * same figure.
+   * A deposit above `amount + deposit_fee` is more than any shortfall can be,
+   * and a non-zero one at or under `deposit_fee` credits nothing; both are
+   * refused rather than signed.
    */
-  private quoteFrom(
-    body: unknown,
-    jobId: Hex,
-    ctx: ChainContext,
-    expiresAt: bigint,
-  ): { amount: bigint } {
-    // **Own properties only on every record below** (`own.ts`), and this is the
-    // second place in the package where the rule guards a *signature*: `amount`
-    // is what this client signs over, and every member of the block beside it
-    // is what says the node means the same job, the same token and the same
-    // window. Read bare, a quote that states none of them is answered by the
-    // prototype and every comparison below agrees with a page rather than with
-    // the coordinator.
+  private quoteFrom(body: unknown, ctx: ChainContext): Quote {
+    // **Own properties only on every record below** (`own.ts`): `deposit` is
+    // the value this client may sign a deposit authorization for, so a quote
+    // read bare would let a polluted prototype name it.
     const quote =
       typeof body === "object" && body !== null
         ? own(body as Record<string, unknown>, "quote")
         : undefined;
     if (typeof quote !== "object" || quote === null) {
-      throw new VorqError("the node answered a challenge with no quote to sign", {
+      throw new VorqError("the node answered a challenge with no quote", {
         type: "api_error",
         statusCode: 402,
       });
     }
     const fields = quote as Record<string, unknown>;
-    const quoted = own(fields, "amount");
-    let amount: bigint | null = null;
-    try {
-      amount = parseUsd(quoted as string, ctx.decimals);
-    } catch {
-      // An amount that is not a USD string at the token's decimals is no amount.
-    }
-    const member = own(fields, "authorization");
-    if (amount === null || typeof member !== "object" || member === null) {
-      throw new VorqError("the node's quote names no amount and authorization this client can check", {
-        type: "api_error",
-        statusCode: 402,
-      });
-    }
-    const auth = member as Record<string, unknown>;
-    const domainMember = own(auth, "domain");
-    const domain = (
-      typeof domainMember === "object" && domainMember !== null ? domainMember : {}
-    ) as Record<string, unknown>;
-    const want = paymentDomain(ctx);
-    const same = (a: unknown, b: string): boolean =>
-      typeof a === "string" && a.toLowerCase() === b.toLowerCase();
-    const agrees =
-      Number(own(domain, "chainId")) === ctx.chainId &&
-      same(own(domain, "verifyingContract"), ctx.usdc) &&
-      own(domain, "name") === want.name &&
-      own(domain, "version") === want.version &&
-      same(own(auth, "to"), ctx.jobRegistry) &&
-      same(own(auth, "nonce"), jobId) &&
-      jsonInt(own(auth, "value")) === amount &&
-      jsonInt(own(auth, "valid_after")) === 0n &&
-      jsonInt(own(auth, "valid_before")) === expiresAt + 1n;
-    if (!agrees) {
+    const figure = (key: string): bigint => {
+      try {
+        return parseUsd(own(fields, key) as string, ctx.decimals);
+      } catch {
+        // Not a USD string at the token's decimals: no figure at all.
+        throw new VorqError(`the node's quote names no ${key} this client can read`, {
+          type: "api_error",
+          statusCode: 402,
+        });
+      }
+    };
+    const read: Quote = {
+      amount: figure("amount"),
+      balance: figure("balance"),
+      deposit: figure("deposit"),
+      depositFee: figure("deposit_fee"),
+    };
+    if (
+      read.deposit > read.amount + read.depositFee ||
+      (read.deposit !== 0n && read.deposit <= read.depositFee)
+    ) {
       throw new VorqError(
-        "the quoted authorization is not the one this client derives for this job and deployment",
+        `the node quoted a deposit of ${formatUsd(read.deposit, ctx.decimals)} for a job that ` +
+          `locks ${formatUsd(read.amount, ctx.decimals)} at a deposit fee of ` +
+          `${formatUsd(read.depositFee, ctx.decimals)}; nothing was signed`,
         { type: "api_error", statusCode: 402 },
       );
     }
-    return { amount };
+    return read;
   }
 
   /**
@@ -2093,9 +2199,45 @@ export class Client {
   }
 }
 
-/** A JSON integer as a `bigint`, or `null` for anything else (a digit string included). */
-function jsonInt(value: unknown): bigint | null {
-  return typeof value === "number" && Number.isSafeInteger(value) ? BigInt(value) : null;
+/** A `402`/`409` quote's money, atomic: what the job locks and what has to be deposited first. */
+interface Quote {
+  amount: bigint;
+  /** The owner's available balance. */
+  balance: bigint;
+  /** `0` when the balance covers `amount`, else the shortfall plus `depositFee`. */
+  deposit: bigint;
+  depositFee: bigint;
+}
+
+/** A balance body (`GET /v1/balance`, and the answer of both money routes), every figure refused unless a USD string. */
+function balanceFrom(what: string, body: unknown): Balance {
+  const r = figureRecord(what, body, "balance");
+  const owner = own(r, "owner");
+  return {
+    owner: typeof owner === "string" ? owner : refuseFigure(what, "owner", "is not a string"),
+    balance: moneyFigure(what, r, "balance"),
+    reserved: moneyFigure(what, r, "reserved"),
+    available: moneyFigure(what, r, "available"),
+    depositFee: moneyFigure(what, r, "deposit_fee"),
+  };
+}
+
+function insufficient(
+  balance: bigint,
+  required: bigint,
+  shortfall: bigint,
+  decimals: number,
+): InsufficientBalance {
+  const fields = {
+    balance: formatUsd(balance, decimals),
+    required: formatUsd(required, decimals),
+    shortfall: formatUsd(shortfall, decimals),
+  };
+  return new InsufficientBalance(
+    `the prepaid balance holds $${fields.balance} and this submission locks $${fields.required}; ` +
+      `deposit at least $${fields.shortfall} (client.deposit) and submit again. Nothing was posted`,
+    fields,
+  );
 }
 
 /** What a market probe is asked about: the job, its pin and its ceilings (atomic, `null` for none). */

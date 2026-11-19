@@ -18,7 +18,7 @@ try {
 ```
 
 ```
-VorqError                  # base; .type, .statusCode, .requestId
+VorqError                  # base; .type, .code, .statusCode, .requestId
 ├── AuthenticationError    # 401: bad or missing session
 ├── TransportError         # the request never became a response; .cause
 ├── NotFoundError          # 404: unknown job, file, model or batch id
@@ -30,6 +30,7 @@ VorqError                  # base; .type, .statusCode, .requestId
 ├── WaitTimeout            # a wait ran out; .jobId
 ├── JobFailed              # a job ended failed or cancelled; .errorType, .jobId
 ├── BatchFailed            # a batch's input file was refused; .batchId
+├── InsufficientBalance    # autoDeposit is off and the balance is short; .balance, .required, .shortfall
 ├── ContainerError         # a malformed sealed container; .fault
 ├── DerivedKeyMismatch     # a wallet derived a different result key for the same address
 ├── NoWalletError          # the wallet exposed no account
@@ -41,6 +42,7 @@ VorqError                  # base; .type, .statusCode, .requestId
 | Member | Type | Meaning |
 | --- | --- | --- |
 | `type` | `string \| null` | The error type from the response body (`error.type`), or a local one. |
+| `code` | `string \| null` | The response body's `error.code`, which tells refusals of one type apart, or `null`. |
 | `statusCode` | `number \| null` | The HTTP status, or `null` for a local error. |
 | `requestId` | `string \| null` | The `x-request-id` response header. Include it in bug reports. |
 
@@ -64,6 +66,7 @@ is a plain `VorqError` with its `statusCode`.
 - **`WaitTimeout`**: `.jobId` is the job (or batch) id, so you can re-attach. Timing out cancels
   nothing.
 - **`BatchFailed`**: `.batchId`. Per-line failures are `JobError` values, not exceptions.
+- **`InsufficientBalance`**: see [below](#insufficientbalance).
 - **`ContainerError`**: `.fault` is `"too_short"`, `"bad_version"` or `"commitment_mismatch"`.
 - **`NoWalletError`**, **`WalletRejectedError`**: from `BrowserWalletSigner`.
 
@@ -79,6 +82,35 @@ is a plain `VorqError` with its `statusCode`.
 | `expired` | `cancelled` | No provider claimed it before it expired. |
 
 An end cause this release does not know falls back to the status.
+
+## `InsufficientBalance`
+
+Raised by `submit` and `batches.submit` on a client built with `autoDeposit: false` when the
+prepaid balance does not cover the job (or the batch's summed lock). Nothing was posted,
+uploaded or deposited. `.type` is `"insufficient_balance"`, `.statusCode` is `null`, and three
+members are USD decimal strings:
+
+| Member | Meaning |
+| --- | --- |
+| `balance` | What the wallet has available. |
+| `required` | What the submission locks. |
+| `shortfall` | `required − balance`: what `client.deposit(shortfall)` has to credit. |
+
+```ts
+import { InsufficientBalance } from "@vorq-ai/client-sdk";
+
+const client = new Client({ signer, autoDeposit: false });
+try {
+  await client.submit({ model, input });
+} catch (error) {
+  if (error instanceof InsufficientBalance) {
+    await client.deposit(error.shortfall);   // one wallet prompt, then submit again
+  } else throw error;
+}
+```
+
+A withdrawal over the available balance is the coordinator's refusal instead: a
+`StateConflictError` whose `.code` is `"insufficient_balance"`.
 
 ## Plain `Error`
 

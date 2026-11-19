@@ -8,6 +8,7 @@
  */
 import { vi } from "vitest";
 import { recoverTypedDataAddress, type Address, type Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { Client } from "../../src/client.js";
 import {
   RECEIVE_AUTHORIZATION_TYPES,
@@ -27,6 +28,8 @@ import { formatUsd, parseUsd } from "../../src/money.js";
 export const usd = (atomic: bigint | number): string => formatUsd(BigInt(atomic), 6);
 
 export const KEY = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+/** The harness signer's address. */
+export const SIGNER_ADDRESS = privateKeyToAccount(KEY).address;
 /** A recipient whose secret key the test holds, so a container can be opened. */
 export const RECIPIENT_SECRET = new Uint8Array(32).fill(0x11);
 export const RECIPIENT_PUBLIC = toHex(curvePublicKey(RECIPIENT_SECRET));
@@ -46,34 +49,102 @@ export const CHAIN = {
 
 export const MODELS = { data: [{ id: "m", object: "model", vorq: { model_id: 7 } }] };
 
+/** The deposit fee the harness node charges, in atomic units: $0.002. */
+export const DEPOSIT_FEE = 2000;
+
 /**
- * The `402` an honest node answers: the amount, and the authorization block the
- * client cross-checks member for member against the one it derives itself.
- * `amount` is atomic here; the quote states it as USD and the block's `value`
- * as the atomic integer it signs.
- *
- * `expiresAt` is the order's own, because `valid_before` is `expiresAt + 1` —
- * a caller that passed anything else is quoting another order's window.
+ * The `402` an honest node answers: what the job locks, the owner's available
+ * balance, and the deposit to make first. Atomic here; the quote states each as
+ * USD. Unset, the balance covers the job and `deposit` is `0`; a `balance`
+ * under `amount` quotes the shortfall plus `DEPOSIT_FEE`.
  */
-export const QUOTE = (jobId: string, expiresAt: bigint, amount = 210) => ({
-  quote: {
-    amount: usd(amount),
-    authorization: {
-      domain: {
-        name: "USDC",
-        version: "2",
-        chainId: 84532,
-        verifyingContract: CHAIN.contracts.usdc,
-      },
-      to: CHAIN.contracts.job_registry,
-      value: amount,
-      valid_after: 0,
-      valid_before: Number(expiresAt + 1n),
-      nonce: jobId,
+export const QUOTE = (amount = 210, over: { balance?: number; deposit?: number } = {}) => {
+  const balance = over.balance ?? 1_000_000_000;
+  const deposit = over.deposit ?? (balance >= amount ? 0 : amount - balance + DEPOSIT_FEE);
+  return {
+    quote: {
+      amount: usd(amount),
+      balance: usd(balance),
+      deposit: usd(deposit),
+      deposit_fee: usd(DEPOSIT_FEE),
     },
-  },
-  accepts: [{ scheme: "eip3009", network: "eip155:84532" }],
+    accepts: [{ scheme: "eip3009", network: "eip155:84532" }],
+  };
+};
+
+/** The body the three balance routes answer, from atomic figures. */
+export const balanceBody = (available: number | bigint, reserved: number | bigint = 0) => ({
+  owner: SIGNER_ADDRESS,
+  balance: usd(BigInt(available) + BigInt(reserved)),
+  reserved: usd(reserved),
+  available: usd(available),
+  deposit_fee: usd(DEPOSIT_FEE),
 });
+
+/**
+ * The node's money routes over one in-memory balance, recording every deposit
+ * and withdrawal body. A deposit credits its `value` less `DEPOSIT_FEE`; a
+ * withdrawal over what is available answers `409`, code `insufficient_balance`.
+ */
+export function ledger(available: number | bigint = 1_000_000_000) {
+  const state = { available: BigInt(available) };
+  const deposits: Record<string, unknown>[] = [];
+  const withdrawals: Record<string, unknown>[] = [];
+  const routes: Route[] = [
+    [/\/v1\/balance\?/, () => json(balanceBody(state.available))],
+    [
+      /\/v1\/deposits$/,
+      (_n, body) => {
+        deposits.push(body as Record<string, unknown>);
+        state.available += parseUsd((body as { value: string }).value, 6) - BigInt(DEPOSIT_FEE);
+        return json(balanceBody(state.available));
+      },
+    ],
+    [
+      /\/v1\/withdrawals$/,
+      (_n, body) => {
+        withdrawals.push(body as Record<string, unknown>);
+        const amount = parseUsd((body as { amount: string }).amount, 6);
+        if (amount > state.available) {
+          return json(
+            { error: { message: "short", type: "invalid_request_error", code: "insufficient_balance" } },
+            409,
+          );
+        }
+        state.available -= amount;
+        return json(balanceBody(state.available));
+      },
+    ],
+  ];
+  return { state, deposits, withdrawals, routes };
+}
+
+/**
+ * Who signed one deposit body, recovered against the payee and value the
+ * caller names. `ecrecover` never fails — a signature over another payee or
+ * value recovers to a stranger — so this is the assertion that pins both.
+ */
+export function depositSignerOf(
+  body: Record<string, unknown>,
+  ctx: ChainContext,
+  to: Address = ctx.jobRegistry,
+): Promise<Address> {
+  const wire = body as { owner: Address; value: string; valid_before: number; nonce: Hex; auth_sig: Hex };
+  return recoverTypedDataAddress({
+    domain: paymentDomain(ctx),
+    types: RECEIVE_AUTHORIZATION_TYPES,
+    primaryType: "ReceiveWithAuthorization",
+    message: {
+      from: wire.owner,
+      to,
+      value: parseUsd(wire.value, ctx.decimals),
+      validAfter: 0n,
+      validBefore: BigInt(wire.valid_before),
+      nonce: wire.nonce,
+    },
+    signature: wire.auth_sig,
+  });
+}
 
 /**
  * `n` is how many times this route has been hit, `body` the parsed request
@@ -196,6 +267,7 @@ export const baseRoutes = (providerBoxKey: string | null = RECIPIENT_PUBLIC): Ro
   [/\/evm\/chain/, () => json(CHAIN)],
   [/\/v1\/models/, () => json(MODELS)],
   [/\/evm\/providers\/\d+/, () => json({ id: 1, name: null, box_key: providerBoxKey })],
+  [/\/v1\/balance\?/, () => json(balanceBody(1_000_000_000))],
   marketRoute(),
 ];
 
@@ -264,13 +336,20 @@ export const probes = (calls: Call[]) =>
   calls.filter((c) => c.method === "POST" && c.url.endsWith("/v1/jobs") && isMarketProbe(c.body));
 
 /**
- * The funded submissions only: the ones carrying a signed payment authorization.
+ * The complete submissions only: the ones carrying the container.
  *
  * A refusal that happens after the terms-only challenge has already gone out is
- * still a refusal that signed nothing, and this is what says so.
+ * still a refusal that posted nothing, and this is what says so.
  */
 export const funded = (calls: Call[]) =>
-  posts(calls).filter((c) => (c.body as { auth_sig?: unknown } | undefined)?.auth_sig !== undefined);
+  posts(calls).filter((c) => {
+    const body = c.body as Record<string, unknown> | undefined;
+    return body !== undefined && ("container" in body || "container_cid" in body);
+  });
+
+/** Every deposit body in a call log. */
+export const depositsIn = (calls: Call[]) =>
+  calls.filter((c) => c.method === "POST" && c.url.endsWith("/v1/deposits"));
 
 /**
  * Submit through both phases and hand back the container the client uploaded,
@@ -291,9 +370,8 @@ export async function sealedByASubmit(input: string | Record<string, unknown>, o
       (n, body) => {
         if (n === 1) captured.order = body as Record<string, unknown>;
         else captured.container = Buffer.from((body as { container: string }).container, "base64");
-        const wire = body as never as { job_id: string; expires_at: number };
         return n === 1
-          ? json(QUOTE(wire.job_id, BigInt(wire.expires_at)), 402)
+          ? json(QUOTE(), 402)
           : json({
               job_id: (body as never as { job_id: string }).job_id,
               task_cid: "bafy",
@@ -334,8 +412,8 @@ export interface BatchHarnessOptions {
   feeBps?: number | null;
   /** What the terms-only `POST /v1/jobs` answers. Default `402`. */
   gasStatus?: number;
-  /** A payee the node names in its quote. The signed authorization must not carry it. */
-  quoteTo?: string;
+  /** The owner's available balance the money routes start from, atomic. Default: covers any batch. */
+  available?: number | bigint;
   fileId?: string;
   /** The batch object `POST /v1/batches` answers with. */
   batch?: Record<string, unknown>;
@@ -407,14 +485,8 @@ export function batchHarness(options: BatchHarnessOptions = {}) {
   /** Every plan asked for: a `POST /v1/batches` body with no file. */
   const plans: Record<string, unknown>[] = [];
 
-  const quote: Record<string, unknown> = {
-    authorization: {
-      // Deliberately hostile when the test names it: a node that gets to choose
-      // the payee a signature authorizes is the finding this batch path exists
-      // as the reference fix for.
-      to: options.quoteTo ?? CHAIN.contracts.job_registry,
-    },
-  };
+  const quote: Record<string, unknown> = {};
+  const money = ledger(options.available);
   if (options.gasFeeRaw !== undefined) {
     quote.gas_fee = options.gasFeeRaw;
   } else if (options.gasFee !== null && options.gasFee !== undefined) {
@@ -433,6 +505,7 @@ export function batchHarness(options: BatchHarnessOptions = {}) {
     ...(options.escrowAnnouncement === undefined
       ? []
       : ([[/\/key$/, () => json(options.escrowAnnouncement!())]] as Route[])),
+    ...money.routes,
     ...baseRoutes(),
     [
       /\/v1\/jobs$/,
@@ -484,7 +557,15 @@ export function batchHarness(options: BatchHarnessOptions = {}) {
     ],
   ], options.clientOptions ?? {});
 
-  return { ...built, termsOnlyPosts, uploads, creates, plans };
+  return {
+    ...built,
+    termsOnlyPosts,
+    uploads,
+    creates,
+    plans,
+    deposits: money.deposits,
+    ledger: money.state,
+  };
 }
 
 /** The non-blank rows of one uploaded manifest, parsed. */
@@ -493,44 +574,6 @@ export const manifestRows = (content: string): Record<string, unknown>[] =>
     .split("\n")
     .filter((line) => line !== "")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
-
-/**
- * Who signed one manifest row's payment, **recovered against a payee the caller
- * names**.
- *
- * The only assertion that can tell an authorization made out to `ctx.jobRegistry`
- * from one made out to whatever a node put in its quote: `ecrecover` never
- * fails, it returns a different address, so a signature over the wrong payee is
- * valid and belongs to a stranger nobody funded. Reading the payee back off the
- * row would prove nothing — the row does not carry one.
- */
-export function paymentSignerOf(
-  row: Record<string, unknown>,
-  ctx: ChainContext,
-  to: Address,
-): Promise<Address> {
-  const wire = row as {
-    owner: Address;
-    job_id: Hex;
-    expires_at: number;
-    auth_sig: Hex;
-    amount: string;
-  };
-  return recoverTypedDataAddress({
-    domain: paymentDomain(ctx),
-    types: RECEIVE_AUTHORIZATION_TYPES,
-    primaryType: "ReceiveWithAuthorization",
-    message: {
-      from: wire.owner,
-      to,
-      value: parseUsd(wire.amount, 6),
-      validAfter: 0n,
-      validBefore: BigInt(wire.expires_at) + 1n,
-      nonce: wire.job_id,
-    },
-    signature: wire.auth_sig,
-  });
-}
 
 /** Open a submitted container as the recipient and read the sealed envelope. */
 export function openEnvelope(container: Uint8Array, owner: string): Record<string, unknown> {

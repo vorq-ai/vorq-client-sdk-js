@@ -34,6 +34,7 @@ import { own } from "./own.js";
 
 export interface VorqErrorOptions {
   type?: string | null;
+  code?: string | null;
   requestId?: string | null;
   statusCode?: number | null;
 }
@@ -41,6 +42,11 @@ export interface VorqErrorOptions {
 export class VorqError extends Error {
   /** The wire `error.type`, or a locally-minted one. */
   readonly type: string | null;
+  /**
+   * The wire `error.code`, a discriminator inside one `type`
+   * (`"insufficient_balance"` on a withdrawal over `available`), or `null`.
+   */
+  readonly code: string | null;
   /** `x-request-id` off the response that carried this error. */
   readonly requestId: string | null;
   /**
@@ -57,6 +63,7 @@ export class VorqError extends Error {
     // name without restating it.
     this.name = new.target.name;
     this.type = options.type ?? null;
+    this.code = options.code ?? null;
     this.requestId = options.requestId ?? null;
     this.statusCode = options.statusCode ?? null;
   }
@@ -178,6 +185,29 @@ export class BatchFailed extends VorqError {
   }
 }
 
+/**
+ * The prepaid balance does not cover this submission, and the client was built
+ * with `autoDeposit: false`. Nothing was posted or deposited.
+ *
+ * All three are USD decimal strings: `balance` is what the owner has available,
+ * `required` what the submission locks, and `shortfall` the difference a
+ * `client.deposit(shortfall)` covers.
+ */
+export class InsufficientBalance extends VorqError {
+  readonly balance: string;
+  readonly required: string;
+  readonly shortfall: string;
+  constructor(
+    message: string,
+    options: { balance: string; required: string; shortfall: string },
+  ) {
+    super(message, { type: "insufficient_balance" });
+    this.balance = options.balance;
+    this.required = options.required;
+    this.shortfall = options.shortfall;
+  }
+}
+
 const STATUS_MAP: ReadonlyMap<number, new (m: string, o?: VorqErrorOptions) => VorqError> =
   new Map([
     [400, ValidationError],
@@ -210,13 +240,16 @@ export function errorFromWire(
       : undefined;
   let message = `HTTP ${statusCode}`;
   let type: string | null = null;
+  let code: string | null = null;
   if (typeof envelope === "object" && envelope !== null) {
     const record = envelope as Record<string, unknown>;
     const stated = own(record, "message");
     const statedType = own(record, "type");
+    const statedCode = own(record, "code");
     if (typeof stated === "string" && stated !== "") message = stated;
     if (typeof statedType === "string") type = statedType;
+    if (typeof statedCode === "string") code = statedCode;
   }
   const cls = STATUS_MAP.get(statusCode) ?? VorqError;
-  return new cls(message, { type, requestId, statusCode });
+  return new cls(message, { type, code, requestId, statusCode });
 }

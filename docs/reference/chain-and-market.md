@@ -63,7 +63,7 @@ Published provider asks. `AskBook.asks` is a list of:
 ## `jobs`
 
 On-chain job rows (`JobBook.jobs`, plain records, typed `EvmJob`). Every row carries `gas_fee`,
-the flat relay gas fee fixed when the job was posted, and `fee`, the protocol fee settlement took
+the flat relay gas fee fixed when the job was claimed, and `fee`, the protocol fee settlement took
 on top of the provider's charge (`"0"` for a job that did not settle), both in USD. A row whose
 `gas_fee` or `fee` is missing or not a USD decimal string raises `VorqError`; `evmJob` checks its
 row the same way.

@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { recoverTypedDataAddress, type Address, type Hex } from "viem";
-import {
-  ORDER_TYPES,
-  RECEIVE_AUTHORIZATION_TYPES,
-  orderDomain,
-  paymentDomain,
-} from "../src/terms.js";
+import { ORDER_TYPES, orderDomain } from "../src/terms.js";
 // Reuse the harness the submit suite already has — do not build a second one.
 import { toBase64 } from "../src/crypto/bytes.js";
 import { parseUsd } from "../src/money.js";
@@ -120,22 +115,22 @@ describe("sealLine / payLine", () => {
     ).not.toBe(wire.owner.toLowerCase());
   });
 
-  it("pays a line from ctx and the gas fee, never from a node-supplied quote", async () => {
+  it("prices a line from its terms and the gas fee, signing nothing", async () => {
     // Rates chosen so the cap is real arithmetic rather than the contract's
     // floor of 1: at 2/3 atomic this payload prices below a single atomic unit and
     // every amount — right, swapped or zero — collapses to the same 1.
-    const { c, ctx, line, wire } = await sealed("1", "2");
-    const row = await c.payLine(line, 7n, ctx, 0n);
+    const { c, ctx, line } = await sealed("1", "2");
+    const row = c.payLine(line, 7n, ctx, 0n);
 
     expect(row.url).toBe("/v1/responses");
     // Flat, and the container base64 inside the JSON: a line is one submission.
     expect(row).toMatchObject(line.order);
     expect(row.container).toBe(toBase64(line.container));
-    const payment = row as { auth_sig: Hex; amount: string };
+    expect(row).not.toHaveProperty("auth_sig");
 
-    // R6: the amount is local arithmetic, and this is the arithmetic written
-    // out rather than `capFor` called a second time — a test that recomputes
-    // the thing it is checking agrees with any answer the code gives.
+    // The amount is local arithmetic, and this is the arithmetic written out
+    // rather than `capFor` called a second time — a test that recomputes the
+    // thing it is checking agrees with any answer the code gives.
     //
     //   rates "1" / "2" USD are 1_000_000 / 2_000_000 atomic at 6 decimals
     //   cap = max(1, ceilDiv(rateIn*unitsIn + rateOut*unitsOut, RATE_SCALE))
@@ -145,42 +140,6 @@ describe("sealLine / payLine", () => {
     //
     // Swapping the two rates gives 4130, so this pins their roles as well as
     // the sum.
-    expect(payment.amount).toBe("0.008216");
-
-    // **The token and the payee come from the chain context, never from a
-    // quote** — the R6 half of this test's own name, and the half a `typeof
-    // auth_sig === "string"` assertion leaves entirely unchecked. Recovering the
-    // authorization under `paymentDomain(ctx)` and `ctx.jobRegistry` is what
-    // says so: a signature over any other pair recovers to a stranger instead of
-    // failing, so a node that named the token and the payee would walk away with
-    // a valid authorization and the wrongness would surface as an unclaimable
-    // job.
-    const paymentSigner = (verifyingContract: Address, to: Address) =>
-      recoverTypedDataAddress({
-        domain: { ...paymentDomain(ctx), verifyingContract },
-        types: RECEIVE_AUTHORIZATION_TYPES,
-        primaryType: "ReceiveWithAuthorization",
-        message: {
-          from: wire.owner,
-          to,
-          value: parseUsd(payment.amount, 6),
-          validAfter: 0n,
-          // `nonce` is the job id, and the window is the order's own expiry off
-          // the wire block plus one — not a value a node supplied.
-          validBefore: BigInt(wire.expires_at) + 1n,
-          nonce: wire.job_id,
-        },
-        signature: payment.auth_sig,
-      });
-
-    expect((await paymentSigner(ctx.usdc, ctx.jobRegistry)).toLowerCase()).toBe(
-      wire.owner.toLowerCase(),
-    );
-    // The two are distinct addresses, so an authorization that named them the
-    // other way round is a different signature by a different signer.
-    expect(ctx.usdc.toLowerCase()).not.toBe(ctx.jobRegistry.toLowerCase());
-    expect((await paymentSigner(ctx.jobRegistry, ctx.usdc)).toLowerCase()).not.toBe(
-      wire.owner.toLowerCase(),
-    );
+    expect(row.amount).toBe("0.008216");
   });
 });

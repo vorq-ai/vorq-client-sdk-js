@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { recoverTypedDataAddress, type Hex } from "viem";
 import {
   Client,
   MAX_EXPIRY_SECONDS,
@@ -7,7 +8,14 @@ import {
 } from "../src/client.js";
 import { PrivateKeySigner } from "../src/signer/private-key.js";
 import { SealedBoxCipher, deriveResultCipher } from "../src/crypto/cipher.js";
-import { EscrowKeyUnverified, ValidationError, VorqError } from "../src/errors.js";
+import {
+  EscrowKeyUnverified,
+  InsufficientBalance,
+  StateConflictError,
+  ValidationError,
+  VorqError,
+} from "../src/errors.js";
+import { WITHDRAW_TYPES, orderDomain } from "../src/terms.js";
 import { INLINE_MAX_BYTES } from "../src/crypto/domains.js";
 import { sealOpen } from "../src/crypto/sealed-box.js";
 import {
@@ -23,16 +31,21 @@ import { JobHandle } from "../src/jobs.js";
 // second copy of a signing-path fixture drifts.
 import {
   CHAIN,
+  DEPOSIT_FEE,
   KEY,
   MODELS,
   QUOTE,
   RECIPIENT_PUBLIC,
   RECIPIENT_SECRET,
+  SIGNER_ADDRESS,
+  balanceBody,
   baseRoutes,
   client,
+  depositSignerOf,
   funded,
   isMarketProbe,
   json,
+  ledger,
   marketCandidate,
   marketRoute,
   openEnvelope,
@@ -44,18 +57,9 @@ import {
   type Route,
 } from "./helpers/submit-harness.js";
 
-/**
- * The `402` an honest node answers to one posted order.
- *
- * Every member of the quoted authorization but the amount is derived from the
- * order this body carries — the job id is the nonce, and the window is
- * `expires_at + 1` — so a quote built any other way is one this client refuses,
- * which is not what most of these tests are about.
- */
-const quoteFor = (body: unknown, amount?: number) => {
-  const order = body as { job_id: string; expires_at: number };
-  return QUOTE(order.job_id, BigInt(order.expires_at), amount);
-};
+/** The `402` an honest node answers to one posted order: a covered balance, no deposit. */
+const quoteFor = (_body: unknown, amount?: number, over: { balance?: number } = {}) =>
+  QUOTE(amount, over);
 
 describe("unit declaration", () => {
   it("takes an explicit units_out over every heuristic, zero included", async () => {
@@ -413,9 +417,6 @@ describe("expiry", () => {
   });
 
   it("covers the SLA window plus the settlement margin", async () => {
-    // The payment authorization must outlive the work, or a long order expires
-    // before /settle.
-    //
     // The expectation is the clamped sum rather than the bare one, so an ambient
     // $VORQ_SETTLEMENT_MARGIN cannot turn a green suite red: a large enough
     // margin pins expires_at to the 86400 ceiling, which is the same rule, and
@@ -481,114 +482,65 @@ describe("model id", () => {
 });
 
 describe("the quote", () => {
-  /** A 402 body whose authorization block is the honest one, patched per test. */
-  const quoteWith = (body: unknown, authorization: Record<string, unknown>) => {
-    const honest = quoteFor(body).quote;
-    return {
-      quote: { ...honest, authorization: { ...honest.authorization, ...authorization } },
-    };
-  };
-
   /** Drive one submit against a scripted 402 body and hand back the outcome. */
-  async function submitAgainst(challenge: (body: unknown) => unknown) {
-    const { client: c, calls } = client([
-      ...baseRoutes(),
+  async function submitAgainst(
+    challenge: (body: unknown) => unknown,
+    options: Partial<ConstructorParameters<typeof Client>[0]> = {},
+  ) {
+    const money = ledger(0);
+    const { client: c, calls } = client(
       [
-        /\/v1\/jobs$/,
-        (n, body) => {
-          const jobId = (body as never as { job_id: string }).job_id;
-          return n === 1
-            ? json(challenge(body), 402)
-            : json({ job_id: jobId, task_cid: "bafy", tx_hash: "0x1" });
-        },
+        ...money.routes,
+        ...baseRoutes(),
+        [
+          /\/v1\/jobs$/,
+          (n, body) => {
+            const jobId = (body as never as { job_id: string }).job_id;
+            return n === 1
+              ? json(challenge(body), 402)
+              : json({ job_id: jobId, task_cid: "bafy", tx_hash: "0x1" });
+          },
+        ],
       ],
-    ]);
+      options,
+    );
     const outcome = await c.submit({ model: "m", input: "hi", provider: 1 }).catch((e: unknown) => e);
-    return { outcome, calls };
+    return { outcome, calls, c, deposits: money.deposits };
   }
 
-  // **This client signs what it derives; the quote supplies the amount and
-  // nothing else.** The block is still read member for member, because a node
-  // describing a different authorization than the one about to be signed is a
-  // node on another deployment — and the result of signing anyway would be an
-  // unclaimable job rather than a refusal.
-  const DERIVED = /not the one this client derives/;
+  const honest = () => QUOTE().quote;
   it.each([
-    ["no quote at all", () => ({}), /no quote to sign/],
-    [
-      "a quote with no authorization block",
-      () => ({ quote: { amount: "0.00021" } }),
-      /names no amount and authorization/,
-    ],
-    [
-      "an amount that is not a USD string",
-      (b: unknown) => ({ quote: { ...quoteFor(b).quote, amount: 210 } }),
-      /names no amount and authorization/,
-    ],
+    ["no quote at all", () => ({}), /no quote/],
+    ["an amount that is not a USD string", () => ({ quote: { ...honest(), amount: 210 } }), /no amount/],
     [
       "an amount finer than the token carries",
-      (b: unknown) => ({ quote: { ...quoteFor(b).quote, amount: "0.0002100" + "1" } }),
-      /names no amount and authorization/,
+      () => ({ quote: { ...honest(), amount: "0.0002100" + "1" } }),
+      /no amount/,
+    ],
+    ["no balance", () => ({ quote: { ...honest(), balance: undefined } }), /no balance/],
+    ["no deposit", () => ({ quote: { ...honest(), deposit: null } }), /no deposit /],
+    ["no deposit_fee", () => ({ quote: { ...honest(), deposit_fee: 2 } }), /no deposit_fee/],
+    // amount 210 + fee 2000 bounds any honest deposit at 2210.
+    [
+      "a deposit above amount + deposit_fee",
+      () => QUOTE(210, { balance: 0, deposit: 2211 }),
+      /quoted a deposit of 0.002211/,
     ],
     [
-      "another deployment's chain",
-      (b: unknown) => quoteWith(b, { domain: { ...quoteFor(b).quote.authorization.domain, chainId: 999 } }),
-      DERIVED,
+      "a non-zero deposit that credits nothing",
+      () => QUOTE(210, { balance: 0, deposit: DEPOSIT_FEE }),
+      /quoted a deposit of 0.002 /,
     ],
-    [
-      "another token",
-      (b: unknown) =>
-        quoteWith(b, {
-          domain: { ...quoteFor(b).quote.authorization.domain, verifyingContract: `0x${"ee".repeat(20)}` },
-        }),
-      DERIVED,
-    ],
-    [
-      "another token name",
-      (b: unknown) =>
-        quoteWith(b, { domain: { ...quoteFor(b).quote.authorization.domain, name: "USD Coin" } }),
-      DERIVED,
-    ],
-    [
-      "another token version",
-      (b: unknown) => quoteWith(b, { domain: { ...quoteFor(b).quote.authorization.domain, version: "1" } }),
-      DERIVED,
-    ],
-    ["another payee", (b: unknown) => quoteWith(b, { to: `0x${"ee".repeat(20)}` }), DERIVED],
-    [
-      "another job's nonce",
-      (b: unknown) => quoteWith(b, { nonce: `0x${"cc".repeat(32)}` }),
-      DERIVED,
-    ],
-    [
-      "a nonce that is not hex at all",
-      (b: unknown) => quoteWith(b, { nonce: "not-a-nonce" }),
-      DERIVED,
-    ],
-    [
-      "a value that is not the amount",
-      (b: unknown) => quoteWith(b, { value: 211 }),
-      DERIVED,
-    ],
-    ["a validity that has not begun", (b: unknown) => quoteWith(b, { valid_after: 1 }), DERIVED],
-    [
-      "a window that is not the order's",
-      (b: unknown) =>
-        quoteWith(b, {
-          valid_before: (b as { expires_at: number }).expires_at + 2,
-        }),
-      DERIVED,
-    ],
-  ])("refuses %s, signing nothing", async (_label, challenge, message) => {
-    const { outcome, calls } = await submitAgainst(challenge);
+  ])("refuses %s, depositing and posting nothing", async (_label, challenge, message) => {
+    const { outcome, calls, deposits } = await submitAgainst(challenge);
     expect(outcome).toBeInstanceOf(VorqError);
     expect((outcome as VorqError).message).toMatch(message);
     expect((outcome as VorqError).statusCode).toBe(402);
-    // The refusal is the whole point: no funded body ever went out.
+    expect(deposits).toHaveLength(0);
     expect(funded(calls)).toHaveLength(0);
   });
 
-  it("refuses a 402 challenge whose body is not JSON, as no quote to sign", async () => {
+  it("refuses a 402 challenge whose body is not JSON, as no quote", async () => {
     // The same infrastructure answers this challenge as the 409 refusal and the
     // 200 receipt, both of which already tolerate a gateway's HTML or an empty
     // body. The 402 must not be the one path that lets a bare SyntaxError escape
@@ -600,33 +552,8 @@ describe("the quote", () => {
     const outcome = await c.submit({ model: "m", input: "hi", provider: 1 }).catch((e: unknown) => e);
     expect(outcome).toBeInstanceOf(VorqError);
     expect(outcome).not.toBeInstanceOf(SyntaxError);
-    expect((outcome as VorqError).message).toMatch(/no quote to sign/);
-    // The refusal is the whole point: no funded body ever went out.
+    expect((outcome as VorqError).message).toMatch(/no quote/);
     expect(funded(calls)).toHaveLength(0);
-  });
-
-  it("compares the quoted addresses case-insensitively", async () => {
-    // The wire spelling is EIP-55 checksummed at one end and lowercase at the
-    // other; only the address is being compared.
-    const { outcome, calls } = await submitAgainst((b) => {
-      const honest = quoteFor(b).quote;
-      return {
-        quote: {
-          ...honest,
-          authorization: {
-            ...honest.authorization,
-            domain: {
-              ...honest.authorization.domain,
-              verifyingContract: honest.authorization.domain.verifyingContract.toLowerCase(),
-            },
-            to: honest.authorization.to.toLowerCase(),
-            nonce: honest.authorization.nonce.toLowerCase(),
-          },
-        },
-      };
-    });
-    expect(outcome).not.toBeInstanceOf(Error);
-    expect(funded(calls)).toHaveLength(1);
   });
 
   it("refuses a non-402 answer to a terms-only body without leaking a rejection", async () => {
@@ -652,35 +579,202 @@ describe("the quote", () => {
     expect(funded(calls)).toHaveLength(0);
   });
 
-  it("signs the window it derives from the order, never one the node names", async () => {
-    // The token requires `now < validBefore` and a claim may land exactly on
-    // `expiresAt`, so the window is the order's own plus one second — and it is
-    // the client's arithmetic, not the quote's, that decides it.
+  it("deposits nothing when the balance covers the job", async () => {
+    const { outcome, calls, deposits } = await submitAgainst(() => QUOTE());
+    expect(outcome).toBeInstanceOf(JobHandle);
+    expect(deposits).toHaveLength(0);
+    expect((funded(calls)[0]!.body as { amount: string }).amount).toBe("0.00021");
+  });
+
+  it("deposits exactly the quoted value, signed to the JobRegistry, before posting the job", async () => {
+    // balance 10 < amount 210: deposit = 200 + DEPOSIT_FEE = 2200 = "0.0022".
+    const before = Math.floor(Date.now() / 1000);
+    const { outcome, calls, c, deposits } = await submitAgainst(() => QUOTE(210, { balance: 10 }));
+    const after = Math.floor(Date.now() / 1000);
+    expect(outcome).toBeInstanceOf(JobHandle);
+    expect(deposits).toHaveLength(1);
+    const deposit = deposits[0]!;
+    expect(Object.keys(deposit)).toEqual(["owner", "value", "valid_before", "nonce", "auth_sig"]);
+    expect(deposit.value).toBe("0.0022");
+    expect(deposit.owner).toBe(SIGNER_ADDRESS);
+    expect(deposit.nonce).toMatch(/^0x[0-9a-f]{64}$/);
+    // One hour to land.
+    expect(deposit.valid_before).toBeGreaterThanOrEqual(before + 3600);
+    expect(deposit.valid_before).toBeLessThanOrEqual(after + 3600);
+    const ctx = await c.chainContext();
+    expect(await depositSignerOf(deposit, ctx)).toBe(SIGNER_ADDRESS);
+    // Recovered against any other payee, the same signature is a stranger's.
+    expect(await depositSignerOf(deposit, ctx, ctx.providerRegistry)).not.toBe(SIGNER_ADDRESS);
+
+    // The deposit went out between the quote and the complete post.
+    const urls = calls.map((call) => `${call.method} ${call.url}`);
+    const [challenge, complete] = posts(calls).map((call) => calls.indexOf(call));
+    const deposited = urls.findIndex((u) => u.endsWith("/v1/deposits"));
+    expect(challenge!).toBeLessThan(deposited);
+    expect(deposited).toBeLessThan(complete!);
+    expect((calls[complete!]!.body as { amount: string }).amount).toBe("0.00021");
+  });
+
+  it("signs a fresh nonce for every deposit", async () => {
+    const first = await submitAgainst(() => QUOTE(210, { balance: 10 }));
+    const second = await submitAgainst(() => QUOTE(210, { balance: 10 }));
+    expect(first.deposits[0]!.nonce).not.toBe(second.deposits[0]!.nonce);
+  });
+
+  it("with autoDeposit off, raises InsufficientBalance and posts nothing", async () => {
+    const { outcome, calls, deposits } = await submitAgainst(() => QUOTE(210, { balance: 10 }), {
+      autoDeposit: false,
+    });
+    expect(outcome).toBeInstanceOf(InsufficientBalance);
+    expect(outcome).toBeInstanceOf(VorqError);
+    expect(outcome).toMatchObject({
+      name: "InsufficientBalance",
+      type: "insufficient_balance",
+      balance: "0.00001",
+      required: "0.00021",
+      shortfall: "0.0002",
+    });
+    expect(deposits).toHaveLength(0);
+    expect(funded(calls)).toHaveLength(0);
+    expect(calls.some((call) => call.url.endsWith("/v1/files"))).toBe(false);
+  });
+
+  it("with autoDeposit off, posts a job the balance covers", async () => {
+    const { outcome, deposits } = await submitAgainst(() => QUOTE(), { autoDeposit: false });
+    expect(outcome).toBeInstanceOf(JobHandle);
+    expect(deposits).toHaveLength(0);
+  });
+
+  it("deposits again on a 409 re-quote whose balance fell short", async () => {
+    const money = ledger(0);
     const { client: c, calls } = client([
+      ...money.routes,
       ...baseRoutes(),
       [
         /\/v1\/jobs$/,
-        (n, b) =>
-          n === 1
-            ? json(quoteFor(b), 402)
-            : json({ job_id: (b as never as { job_id: string }).job_id }),
+        (n, body) => {
+          const jobId = (body as never as { job_id: string }).job_id;
+          if (n === 1) return json(QUOTE(), 402);
+          if (n === 2) return json(QUOTE(999, { balance: 0 }), 409);
+          return json({ job_id: jobId, task_cid: "bafy", tx_hash: "0x1" });
+        },
       ],
     ]);
-    const handle = await c.submit({ model: "m", input: "hi", provider: 1 });
+    await c.submit({ model: "m", input: "hi", provider: 1 });
+    expect(money.deposits.map((d) => d.value)).toEqual(["0.002999"]);
+    const [, first, second] = posts(calls);
+    expect((first!.body as { amount: string }).amount).toBe("0.00021");
+    expect((second!.body as { amount: string }).amount).toBe("0.000999");
+  });
+});
 
-    const payment = funded(calls).at(-1)!;
-    const wire = payment.body as { auth_sig: `0x${string}`; expires_at: number };
+describe("the prepaid balance", () => {
+  it("balance() reads GET /v1/balance for the signer", async () => {
+    const money = ledger(1_500_000);
+    const { client: c, calls } = client([...money.routes, ...baseRoutes()]);
+    expect(await c.balance()).toEqual({
+      owner: SIGNER_ADDRESS,
+      balance: "1.5",
+      reserved: "0",
+      available: "1.5",
+      depositFee: "0.002",
+    });
+    const read = calls.find((call) => call.url.includes("/v1/balance"))!;
+    expect(new URL(read.url).searchParams.get("owner")).toBe(SIGNER_ADDRESS);
+  });
 
-    // The same authorization re-signed over the order's own expiry must match
-    // byte for byte; over any other value it cannot.
+  it("balance() refuses a figure that is not a USD string", async () => {
+    const { client: c } = client([
+      [/\/v1\/balance\?/, () => json({ ...balanceBody(5), available: 5 })],
+      ...baseRoutes(),
+    ]);
+    await expect(c.balance()).rejects.toThrow(/available is not a USD decimal string/);
+  });
+
+  it("deposit(amount) signs amount + deposit_fee and answers the new balance", async () => {
+    const money = ledger(0);
+    const { client: c } = client([...money.routes, ...baseRoutes()]);
+    const after = await c.deposit("5");
+    expect(money.deposits).toHaveLength(1);
+    expect(money.deposits[0]!.value).toBe("5.002");
+    expect(after.available).toBe("5");
+    expect(await depositSignerOf(money.deposits[0]!, await c.chainContext())).toBe(SIGNER_ADDRESS);
+  });
+
+  it.each([["0"], ["-1"], ["1.0000001"], [5 as unknown as string]])(
+    "deposit(%o) is refused before anything is signed",
+    async (amount) => {
+      const money = ledger(0);
+      const { client: c } = client([...money.routes, ...baseRoutes()]);
+      await expect(c.deposit(amount)).rejects.toBeInstanceOf(ValidationError);
+      expect(money.deposits).toHaveLength(0);
+    },
+  );
+
+  it("withdraw(amount) signs Withdraw(amount, issuedAt) on the JobRegistry's domain", async () => {
+    const money = ledger(3_000_000);
+    const { client: c } = client([...money.routes, ...baseRoutes()]);
+    const before = Math.floor(Date.now() / 1000);
+    const after = await c.withdraw("1.25");
+    expect(after.available).toBe("1.75");
+    const body = money.withdrawals[0] as { owner: string; amount: string; issued_at: number; signature: Hex };
+    expect(Object.keys(body)).toEqual(["owner", "amount", "issued_at", "signature"]);
+    expect(body.owner).toBe(SIGNER_ADDRESS);
+    expect(body.amount).toBe("1.25");
+    expect(body.issued_at).toBeGreaterThanOrEqual(before);
     const ctx = await c.chainContext();
-    const signer = new PrivateKeySigner(KEY);
-    const args = { amount: 210n, jobId: handle.id as `0x${string}`, ctx };
-    const expiresAt = BigInt(wire.expires_at);
-    expect(wire.auth_sig).toBe(await signer.signPaymentAuthorization({ ...args, expiresAt }));
-    expect(wire.auth_sig).not.toBe(
-      await signer.signPaymentAuthorization({ ...args, expiresAt: expiresAt + 1n }),
-    );
+    const recovered = await recoverTypedDataAddress({
+      domain: orderDomain(ctx),
+      types: WITHDRAW_TYPES,
+      primaryType: "Withdraw",
+      message: { amount: 1_250_000n, issuedAt: BigInt(body.issued_at) },
+      signature: body.signature,
+    });
+    expect(recovered).toBe(SIGNER_ADDRESS);
+  });
+
+  it("withdraw() surfaces the node's insufficient_balance refusal", async () => {
+    const money = ledger(1_000);
+    const { client: c } = client([...money.routes, ...baseRoutes()]);
+    const refusal = await c.withdraw("1").catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(StateConflictError);
+    expect((refusal as VorqError).type).toBe("invalid_request_error");
+    expect((refusal as VorqError).code).toBe("insufficient_balance");
+  });
+
+  it("two withdraw() calls in one second sign strictly increasing issued_at", async () => {
+    const money = ledger();
+    const { client: c } = client([...money.routes, ...baseRoutes()]);
+    vi.spyOn(Date, "now").mockReturnValue(1_800_000_000_250);
+    try {
+      await c.withdraw("1");
+      await c.withdraw("1");
+    } finally {
+      vi.restoreAllMocks();
+    }
+    const [first, second] = money.withdrawals.map((w) => (w as { issued_at: number }).issued_at);
+    expect(first).toBe(1_800_000_000);
+    expect(second).toBe(first! + 1);
+  });
+
+  it.each([["0"], ["abc"]])("withdraw(%o) is refused before anything is signed", async (amount) => {
+    const money = ledger(1_000);
+    const { client: c } = client([...money.routes, ...baseRoutes()]);
+    await expect(c.withdraw(amount)).rejects.toBeInstanceOf(ValidationError);
+    expect(money.withdrawals).toHaveLength(0);
+  });
+
+  it("the balance routes need a signer", async () => {
+    vi.stubEnv("VORQ_WALLET_KEY", "");
+    try {
+      const { impl } = scriptedFetch(baseRoutes());
+      const c = new Client({ baseUrl: "http://node", fetch: impl });
+      await expect(c.balance()).rejects.toThrow(/pass a signer/);
+      await expect(c.deposit("1")).rejects.toThrow(/pass a signer/);
+      await expect(c.withdraw("1")).rejects.toThrow(/pass a signer/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 
@@ -806,11 +900,11 @@ describe("the two-request exchange", () => {
     await c.submit({ model: "m", input: "hi", provider: 1 });
     const [challenge, payment] = posts(calls);
     expect(challenge!.body).not.toHaveProperty("container");
-    expect(challenge!.body).not.toHaveProperty("auth_sig");
+    expect(challenge!.body).not.toHaveProperty("amount");
     expect(payment!.body).toHaveProperty("container");
   });
 
-  it("posts the paid submission as flat JSON: order fields, base64 container, auth_sig and amount", async () => {
+  it("posts the complete submission as flat JSON: order fields, base64 container and amount", async () => {
     const { client: c, calls } = client([
       ...baseRoutes(),
       jobsRoute([
@@ -830,7 +924,7 @@ describe("the two-request exchange", () => {
     // So is the paid submission — JSON again, not a form.
     expect(typeof payment!.init.body).toBe("string");
     expect(new Headers(payment!.init.headers).get("content-type")).toBe("application/json");
-    expect(Object.keys(payment!.body as object)).toEqual([...ORDER, "container", "auth_sig", "amount"]);
+    expect(Object.keys(payment!.body as object)).toEqual([...ORDER, "container", "amount"]);
 
     const body = payment!.body as Record<string, unknown>;
     expect(typeof body.container).toBe("string");
@@ -960,11 +1054,11 @@ describe("the two-request exchange", () => {
     expect(failure).toBeInstanceOf(VorqError);
     expect((failure as Error).message).toMatch(/no vorq\.cid for file file_1/);
 
-    // And the paid submission was never sent — only the challenge was.
-    expect(posts(calls).filter((call) => "auth_sig" in (call.body as object))).toEqual([]);
+    // And the complete submission was never sent — only the challenge was.
+    expect(funded(calls)).toEqual([]);
   });
 
-  it("does not re-upload a large container when re-signing after a 409", async () => {
+  it("does not re-upload a large container when re-posting after a 409", async () => {
     const { client: c, calls } = client([
       ...baseRoutes(),
       [
@@ -985,9 +1079,9 @@ describe("the two-request exchange", () => {
 
     expect(calls.filter((call) => call.url.endsWith("/v1/files"))).toHaveLength(1);
     const [, first, second] = posts(calls);
-    type Complete = { container_cid: string; auth_sig: string; amount: string };
+    type Complete = { container_cid: string; amount: string };
     expect((second!.body as Complete).container_cid).toBe((first!.body as Complete).container_cid);
-    expect((second!.body as Complete).auth_sig).not.toBe((first!.body as Complete).auth_sig);
+    expect((first!.body as Complete).amount).toBe("0.00021");
     expect((second!.body as Complete).amount).toBe("0.000999");
   });
 
@@ -1004,7 +1098,7 @@ describe("the two-request exchange", () => {
     );
   });
 
-  it("re-signs only the payment on a 409 carrying a quote, reusing the container", async () => {
+  it("re-posts only the new amount on a 409 carrying a quote, reusing the container", async () => {
     // The terms and `c` are unchanged, so a drifting gas fee never costs a
     // fresh seed, a fresh `c`, or a second upload of the payload.
     const { client: c, calls } = client([
@@ -1021,10 +1115,10 @@ describe("the two-request exchange", () => {
     ]);
     await c.submit({ model: "m", input: "hi", provider: 1 });
     const [, first, second] = posts(calls);
-    type Complete = { container: string; c: string; auth_sig: string; amount: string };
+    type Complete = { container: string; c: string; amount: string };
     expect((second!.body as Complete).container).toEqual((first!.body as Complete).container);
     expect((second!.body as Complete).c).toBe((first!.body as Complete).c);
-    expect((second!.body as Complete).auth_sig).not.toBe((first!.body as Complete).auth_sig);
+    expect((first!.body as Complete).amount).toBe("0.00021");
     expect((second!.body as Complete).amount).toBe("0.000999");
   });
 
@@ -1315,74 +1409,28 @@ describe("what a submission hands back", () => {
     expect(read.url).toBe(`http://node/v1/jobs/${handle.id}`);
   });
 
-  it("re-signs the re-quoted amount, and the value it authorizes moves with it", async () => {
-    // A loop that threaded the new amount into the body but kept the first
-    // quote's signature would send a body whose `amount` and whose signed
-    // `value` disagree — and the node would refuse it for a reason naming
-    // neither. Only the fee moves here, so a client that ignored the second
-    // quote entirely would send an identical auth_sig.
-    let jobId = "";
+  it("re-checks a re-quote rather than trusting it because the first one passed", async () => {
+    // A node that quotes honestly, is refused, and then re-quotes a deposit
+    // larger than any shortfall could be would otherwise have this client sign
+    // a deposit authorization for a value it never meant to move.
+    const money = ledger(0);
     const { client: c, calls } = client([
-      ...baseRoutes(),
-      [
-        /\/v1\/jobs$/,
-        (n, b) => {
-          jobId = (b as { job_id: string }).job_id;
-          if (n === 1) return json(quoteFor(b), 402);
-          if (n === 2) return json(quoteFor(b, 999), 409);
-          return json({ job_id: jobId });
-        },
-      ],
-    ]);
-    await c.submit({ model: "m", input: "hi", provider: 1 });
-    const [, first, second] = posts(calls);
-    const paid = (call: Call) => call.body as { auth_sig: string; amount: string; expires_at: number };
-    expect(paid(second!).auth_sig).not.toBe(paid(first!).auth_sig);
-    expect(paid(second!).amount).toBe("0.000999");
-
-    const signer = new PrivateKeySigner(KEY);
-    expect(paid(second!).auth_sig).toBe(
-      await signer.signPaymentAuthorization({
-        amount: 999n,
-        jobId: jobId as `0x${string}`,
-        expiresAt: BigInt(paid(second!).expires_at),
-        ctx: await c.chainContext(),
-      }),
-    );
-  });
-
-  it("re-checks a re-quote against its own context rather than trusting the second one", async () => {
-    // The first quote passing is not a licence for the second: a node that
-    // quotes honestly, is refused, and then re-quotes another deployment's chain
-    // would otherwise get a valid signature over an authorization the caller
-    // never meant to give.
-    const { client: c, calls } = client([
+      ...money.routes,
       ...baseRoutes(),
       [
         /\/v1\/jobs$/,
         (n, b) => {
           if (n === 1) return json(quoteFor(b), 402);
-          const honest = quoteFor(b).quote;
-          return json(
-            {
-              quote: {
-                ...honest,
-                authorization: {
-                  ...honest.authorization,
-                  domain: { ...honest.authorization.domain, chainId: 1 },
-                },
-              },
-            },
-            409,
-          );
+          return json(QUOTE(210, { balance: 0, deposit: 10_000_000 }), 409);
         },
       ],
     ]);
     await expect(c.submit({ model: "m", input: "hi", provider: 1 })).rejects.toThrow(
-      /not the one this client derives/,
+      /quoted a deposit of 10/,
     );
-    // One challenge and one funded attempt: the bad re-quote signed nothing.
+    // One complete attempt, and the bad re-quote deposited nothing.
     expect(funded(calls)).toHaveLength(1);
+    expect(money.deposits).toHaveLength(0);
   });
 
   it("discards a 402 answered to a complete submission without leaking a rejection", async () => {
@@ -1555,28 +1603,30 @@ describe("the upload-first path's operational bounds", () => {
     (n: number, body: unknown) => answers[Math.min(n, answers.length) - 1]!(body as Posted),
   ];
 
-  it("files the container only after the payment is signed", async () => {
+  it("files the container only after the deposit is signed", async () => {
     // The orphan window opens the moment the bytes are filed: an upload nobody
-    // has attached is deleted after 300 s. `signPaymentAuthorization` is a wallet
+    // has attached is deleted after 300 s. `signDepositAuthorization` is a wallet
     // prompt in a browser — a dialog a human has to notice and approve — so an
     // upload ahead of it starts that clock and then waits on a person. Six
     // minutes in another tab and the sweep wins, the post is refused
     // `unknown_container`, and the node marks that refusal not retryable.
     //
-    // Signing first costs nothing: the payment does not depend on the container,
-    // and a caller who declines the prompt never uploads at all.
+    // Depositing first costs nothing: the deposit does not depend on the
+    // container, and a caller who declines the prompt never uploads at all.
     const order: string[] = [];
     // The real signer, with one method watched: a hand-built stand-in would have
     // to reimplement the handshake too, and this test is about ordering.
     const signer = new PrivateKeySigner(KEY);
-    const realPayment = signer.signPaymentAuthorization.bind(signer);
-    vi.spyOn(signer, "signPaymentAuthorization").mockImplementation(async (...args) => {
-      order.push("payment");
-      return realPayment(...args);
+    const realDeposit = signer.signDepositAuthorization.bind(signer);
+    vi.spyOn(signer, "signDepositAuthorization").mockImplementation(async (...args) => {
+      order.push("deposit");
+      return realDeposit(...args);
     });
+    const money = ledger(0);
 
     const { client: c } = client(
       [
+        ...money.routes,
         ...baseRoutes(),
         [
           /\/v1\/files$/,
@@ -1592,7 +1642,7 @@ describe("the upload-first path's operational bounds", () => {
           },
         ],
         jobsRoute([
-          (b) => json(quoteFor(b), 402),
+          (b) => json(quoteFor(b, 210, { balance: 0 }), 402),
           (b) => json({ job_id: b.job_id, task_cid: "bafy", tx_hash: "0x1" }),
         ]),
       ],
@@ -1601,11 +1651,11 @@ describe("the upload-first path's operational bounds", () => {
 
     await c.submit({ model: "m", input: "x".repeat(INLINE_MAX_BYTES + 1024), provider: 1 });
 
-    expect(order).toEqual(["payment", "upload"]);
+    expect(order).toEqual(["deposit", "upload"]);
   });
 
   it("still files the container once across a re-quote", async () => {
-    // The other half of the ordering change: moving the upload after the payment
+    // The other half of the ordering change: moving the upload after the deposit
     // must not move it *into* the attempt loop, or a gas-fee re-quote re-sends
     // the whole payload — which is the cost the upload-first path exists to
     // avoid paying twice.

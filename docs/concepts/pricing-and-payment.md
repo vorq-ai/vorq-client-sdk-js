@@ -1,6 +1,6 @@
 ---
 title: Pricing and payment
-description: How rates, unit counts, the escrow cap and the payment authorization fit together.
+description: How rates, unit counts, the cap and the prepaid balance fit together.
 ---
 
 Every order states its own price. You name the most you will pay for each side of the job, and
@@ -22,7 +22,7 @@ const handle = await client.submit({
 whatever providers are asking when it is posted, and when a provider asks less you pay that. It
 caps the input side only; the output side pays the matched provider's ask unless you name
 `maxRateOut` too. This matters most in a [batch](../guides/submit-a-batch.md), where every line
-is signed and paid for in one call.
+is signed and priced in one call.
 
 Set it too low and no provider matches: the order
 [rests](../reference/submit.md#how-the-rates-are-chosen) and may expire without being served.
@@ -84,28 +84,53 @@ reference units. `cachedTok` is the part of the prompt the model served from its
 `rateInCached`, which is never above `rateIn` (0 when the model reports none, always 0 for media).
 `completionTok` is the delivered output, at most `units_out`.
 
-At submission the coordinator quotes an amount in USD, and the client signs an EIP-3009
-`ReceiveWithAuthorization` for it in the deployment's USDC token. For a batch the client computes
-the same amount per line itself:
+At submission the coordinator quotes the **amount** the job locks, in USD. For a batch the client
+computes the same amount per line itself:
 
 ```
 amount = cap + floor(cap × feeBps / 10 000) + gas fee
 ```
 
 `feeBps` is the protocol fee from `client.chainContext()`, and the gas fee comes from the quote.
-The client derives every other member of the authorization itself: it is payable to the job
-registry, valid until the order's expiry, and single-use because its nonce is the job id. A
-quote describing any other authorization is refused.
 
-Nothing moves while the order is open. The chain pulls the amount when a provider claims the
-job, and job rows report the gas fee it used as `gas_fee` and the protocol fee settlement took as
-`fee` (`"0"` until the job settles). How the job ends decides who keeps what:
+## The prepaid balance
 
-| Ending | Provider | Treasury | Refunded to you |
-| --- | --- | --- | --- |
-| Settled | the charge | `floor(charge × feeBps / 10 000)` + gas fee | the rest |
-| Provider failed, or reclaimed after the window | nothing | gas fee | cap + protocol fee on the cap |
-| Cancelled or expired while open | nothing | nothing | nothing was taken |
+Jobs are paid from a balance the JobRegistry holds for your wallet. A deposit is a gasless
+EIP-3009 `ReceiveWithAuthorization` in the deployment's USDC token, payable only to the job
+registry and single-use by its random nonce; the coordinator relays it, so **the wallet never
+needs ETH**. Each deposit pays a flat deposit fee, credited to the relayer that lands it; the
+rest is your balance.
+
+```ts
+const funds = await client.balance();   // { balance, reserved, available, depositFee, owner }
+await client.deposit("10");             // signs $10 + the deposit fee; $10 is credited
+await client.withdraw("4");             // back to the wallet, at any time
+```
+
+`reserved` is what your open orders will lock when a provider claims them; `available` is the
+rest, what a new submission or a withdrawal can use. Withdrawals are signed by you and relayed
+like deposits.
+
+You rarely deposit by hand. When the quote says the available balance is short, it names the
+deposit to make first, the shortfall plus the deposit fee, and `submit` signs one deposit
+authorization for exactly that value before it posts the job. A batch checks its summed lock
+against `balance()` before the upload and deposits any shortfall once. Build the client with
+`autoDeposit: false` to decide yourself: a short balance then raises `InsufficientBalance`,
+carrying `balance`, `required` and `shortfall` as USD strings, and nothing is posted.
+
+A quote whose non-zero `deposit` is not above `deposit_fee` or is above `amount + deposit_fee` is
+refused.
+
+Nothing moves while the order is open. The chain locks the amount from your balance when a
+provider claims the job, and job rows report the gas fee it used as `gas_fee` and the protocol
+fee settlement took as `fee` (`"0"` until the job settles). How the job ends decides who keeps
+what:
+
+| Ending | Provider | Treasury | Relayer of the claim | Back to your balance |
+| --- | --- | --- | --- | --- |
+| Settled | the charge | `floor(charge × feeBps / 10 000)` | gas fee | the rest |
+| Provider failed, or reclaimed after the window | nothing | nothing | gas fee | cap + protocol fee on the cap |
+| Cancelled or expired while open | nothing | nothing | nothing | nothing was locked |
 
 ## What a result reports
 

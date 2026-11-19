@@ -103,7 +103,7 @@ const jobsRoute = (captured: Captured): Route => [
     const order = body as { job_id: string; expires_at: number };
     const jobId = order.job_id;
     return n % 2 === 1
-      ? json(QUOTE(jobId, BigInt(order.expires_at)), 402)
+      ? json(QUOTE(), 402)
       : json({ job_id: jobId, task_cid: "bafy", tx_hash: "0x1" });
   },
 ];

@@ -14,6 +14,7 @@ import {
   RECEIVE_AUTHORIZATION_TYPES,
   sessionDomain,
   SESSION_TYPES,
+  WITHDRAW_TYPES,
   orderDomain,
   paymentDomain,
   type ChainContext,
@@ -105,7 +106,7 @@ export class PrivateKeySigner implements Signer {
     return this.account.signMessage({ message });
   }
 
-  // The three chain-bound methods. Each takes its `ChainContext` explicitly:
+  // The four chain-bound methods. Each takes its `ChainContext` explicitly:
   // the two VORQ domains differ in exactly one member — `verifyingContract` —
   // so a signer that guessed would produce a signature that recovers to a
   // stranger and is refused by nothing until the chain refuses it.
@@ -128,31 +129,39 @@ export class PrivateKeySigner implements Signer {
     });
   }
 
+  async signWithdraw(amount: bigint, issuedAt: bigint, ctx: ChainContext): Promise<Hex> {
+    return this.account.signTypedData({
+      domain: orderDomain(ctx),
+      types: WITHDRAW_TYPES,
+      primaryType: "Withdraw",
+      message: { amount, issuedAt },
+    });
+  }
+
   /**
-   * The escrow payment: EIP-3009 `ReceiveWithAuthorization`.
+   * A deposit: EIP-3009 `ReceiveWithAuthorization` into the prepaid balance.
    *
    * Only the payee — the JobRegistry — can execute it, so a signature that
-   * leaked authorizes nobody else; `nonce` is the job id, so the token's own
-   * nonce table makes it single-use.
+   * leaked authorizes nobody else; the random `nonce` makes it single-use in
+   * the token's own nonce table.
    */
-  async signPaymentAuthorization(args: {
-    amount: bigint;
-    jobId: Hex;
-    expiresAt: bigint;
-    ctx: ChainContext;
-  }): Promise<Hex> {
+  async signDepositAuthorization(
+    amount: bigint,
+    nonce: Hex,
+    validBefore: bigint,
+    ctx: ChainContext,
+  ): Promise<Hex> {
     return this.account.signTypedData({
-      domain: paymentDomain(args.ctx),
+      domain: paymentDomain(ctx),
       types: RECEIVE_AUTHORIZATION_TYPES,
       primaryType: "ReceiveWithAuthorization",
       message: {
         from: this.address,
-        to: args.ctx.jobRegistry,
-        value: args.amount,
+        to: ctx.jobRegistry,
+        value: amount,
         validAfter: 0n,
-        // the token requires now < validBefore, and a claim may land exactly on expiresAt
-        validBefore: args.expiresAt + 1n,
-        nonce: args.jobId,
+        validBefore,
+        nonce,
       },
     });
   }

@@ -46,10 +46,10 @@
  *     defect was a client that could not submit at all.
  *   - `BatchHandle`'s status read (`statusOf`) has **two** — the `cancel` gate
  *     and the wait loop's terminal test — because both call the one guard.
- *   - `Client.payLine`'s five reads (`terms`, `url`, `order`, `container`,
- *     `jobId`) share one `stated` guard, so one test covers them and reverting
- *     any *single* read is masked by the others — `jobId` alone still throws
- *     out of `BigInt(undefined)`. The measured revert is the helper itself.
+ *   - `Client.payLine`'s four reads (`terms`, `url`, `order`, `container`)
+ *     share one `stated` guard, so one test covers them and reverting any
+ *     *single* read is masked by the others. The measured revert is the helper
+ *     itself.
  *   - `Client.jobsSummary` reads every figure through the one `moneyFigure`
  *     guard, so reverting it reddens both tests that pollute a wire figure:
  *     the summary body and the `by_model` row. Each still isolates its own *record*, because
@@ -166,6 +166,7 @@ import {
   baseRoutes,
   batchHarness,
   client,
+  funded,
   handleHarness,
   json,
   manifestRows,
@@ -278,11 +279,8 @@ async function pollutedAllAsync<T>(
   }
 }
 
-/** The honest `402` for one posted order, off the body the route was handed. */
-const quoted = (body: unknown) => {
-  const order = body as { job_id: string; expires_at: number };
-  return QUOTE(order.job_id, BigInt(order.expires_at));
-};
+/** The honest `402` for one posted order. */
+const quoted = (_body: unknown) => QUOTE();
 
 function pollutedAll<T>(entries: [string, unknown][], body: () => T): T {
   for (const [key, value] of entries) pollute(key, value);
@@ -1268,7 +1266,7 @@ describe("client — telling a re-quote from a refusal", () => {
           : json({ error: { message: "DuplicateJob", code: "DuplicateJob" } }, 409),
     ];
     const { client: c } = client([...baseRoutes(), jobsRoute]);
-    await pollutedAsync("quote", QUOTE("0x1", 0n).quote, async () => {
+    await pollutedAsync("quote", QUOTE().quote, async () => {
       await expect(c.submit({ model: "m", input: "hi", provider: 1 })).rejects.toThrow(
         /DuplicateJob/,
       );
@@ -2377,54 +2375,25 @@ describe("client — the arguments a sealed order is built from", () => {
 
 /**
  * The node's quote, which is the one thing a submission takes off the network
- * before it signs a payment.
+ * before it may sign a deposit.
  *
- * Every read below fails **closed**, and that is the change: this client derives
- * the whole authorization itself and the quote has to agree member for member,
- * so a prototype standing in for a member the node never sent turns a quote this
- * client must refuse into one it signs. The honest value of every one of those
- * members is either a constant of the deployment or a field the node just echoed
- * back, so a page that can pollute can supply all of them.
+ * Every read below fails **closed**: `deposit` is the value a deposit
+ * authorization is signed for, and the other three bound it, so a prototype
+ * standing in for a member the node never sent would decide what this client
+ * moves.
  */
-describe("client — the quote a payment authorization is checked against", () => {
-  /** The job and the window the probes below quote for. Both are the client's own. */
-  const JOB = `0x${"11".repeat(32)}`;
-  const EXPIRES = 1_800_003_600n;
-  const HONEST = () => QUOTE(JOB, EXPIRES).quote;
+describe("client — the quote a deposit is checked against", () => {
+  const HONEST = () => QUOTE().quote;
 
-  /**
-   * `quoteFrom` itself, reached by cast — narrower than driving a whole
-   * `submit`, and deliberately so.
-   *
-   * One of the members below is `value`, and `value` is a **property-descriptor
-   * key**: a realm whose `Object.prototype` carries one makes every
-   * `Object.defineProperty(o, k, { get … })` anywhere in the process throw
-   * "cannot both specify accessors and a value". Held open across an `await` that
-   * takes the run down with it; held across one synchronous call it reaches
-   * exactly the reads under test and nothing else. Measured — the end-to-end
-   * form of this test failed that way before it was narrowed.
-   */
-  const read = (body: unknown): { amount: bigint } => {
+  /** `quoteFrom` itself, reached by cast — one synchronous call under the pollution. */
+  const read = (body: unknown): unknown => {
     const { client: c } = client(baseRoutes());
     return (
-      c as unknown as {
-        quoteFrom(
-          body: unknown,
-          jobId: string,
-          ctx: ChainContext,
-          expiresAt: bigint,
-        ): { amount: bigint };
-      }
-    ).quoteFrom(body, JOB, CTX, EXPIRES);
+      c as unknown as { quoteFrom(body: unknown, ctx: ChainContext): unknown }
+    ).quoteFrom(body, CTX);
   };
 
-  /**
-   * Read `body` with `key` on the prototype, and hand back the refusal.
-   *
-   * The pollution is released **before** the assertion runs, for the reason
-   * above: an expectation that failed while `Object.prototype.value` was still
-   * in place would report a descriptor error rather than its own diff.
-   */
+  /** Read `body` with `key` on the prototype, and hand back the refusal. */
   const refusalFor = (key: string, value: unknown, body: unknown): Error | null =>
     polluted(key, value, () => {
       try {
@@ -2435,96 +2404,40 @@ describe("client — the quote a payment authorization is checked against", () =
       }
     });
 
-  /** The honest quote for this job, less the named member. */
-  const quoteLess = (member: string, from: "authorization" | "domain") => {
-    const { authorization, ...rest } = HONEST();
-    const auth = { ...authorization } as Record<string, unknown>;
-    if (from === "domain") {
-      const domain = { ...authorization.domain } as Record<string, unknown>;
-      delete domain[member];
-      auth.domain = domain;
-    } else {
-      delete auth[member];
-    }
-    return { quote: { ...rest, authorization: auth } };
-  };
-
-  /**
-   * Every member of the quoted authorization, and the value a polluted prototype
-   * would have to supply for a bare read to find the quote in agreement.
-   */
-  const MEMBERS: Array<[string, "authorization" | "domain", unknown]> = [
-    ["chainId", "domain", 84532],
-    ["verifyingContract", "domain", CHAIN.contracts.usdc],
-    ["name", "domain", "USDC"],
-    ["version", "domain", "2"],
-    ["to", "authorization", CHAIN.contracts.job_registry],
-    ["nonce", "authorization", JOB],
-    ["value", "authorization", 210],
-    ["valid_after", "authorization", 0],
-    ["valid_before", "authorization", Number(EXPIRES + 1n)],
-  ];
-
-  // Sites: `own(auth, …)` and `own(domain, …)` in `quoteFrom`.
-  it.each(MEMBERS)("checks no %s the quote never stated", (member, from, honest) => {
-    const refusal = refusalFor(member, honest, quoteLess(member, from));
-    expect(refusal?.message).toMatch(/not the one this client derives/);
-  });
+  // Sites: `own(fields, …)` in `quoteFrom`.
+  it.each(["amount", "balance", "deposit", "deposit_fee"])(
+    "reads no %s the quote never stated",
+    (member) => {
+      const honest = HONEST() as Record<string, unknown>;
+      const { [member]: value, ...rest } = honest;
+      expect(refusalFor(member, value, { quote: rest })?.message).toMatch(
+        new RegExp(`names no ${member} `),
+      );
+    },
+  );
 
   // Site: `own(body, "quote")` in `quoteFrom`.
   it("reads no quote from the challenge body's prototype", () => {
-    expect(refusalFor("quote", HONEST(), {})?.message).toMatch(/no quote to sign/);
+    expect(refusalFor("quote", HONEST(), {})?.message).toMatch(/no quote/);
   });
 
-  // Site: `own(fields, "authorization")` in `quoteFrom`.
-  //
-  // Asserted on the **message**, because both readings refuse: read bare, an
-  // empty prototype block is an object, and the member-for-member comparison is
-  // what turns it away — one refusal later, naming the wrong cause.
-  it("reads no authorization block from the quote's prototype", () => {
-    const refusal = refusalFor("authorization", {}, { quote: { amount: usd(210) } });
-    expect(refusal?.message).toMatch(/names no amount and authorization/);
-  });
-
-  // Site: `own(fields, "amount")` in `quoteFrom`.
-  //
-  // The amount is the one figure this client takes from the node, so a quote
-  // stating none has nothing to sign — and a prototype supplying one that agrees
-  // with the quoted `value` is signed for silently.
-  it("signs no amount the quote never named", () => {
-    const { amount: _drop, ...rest } = HONEST();
-    expect(refusalFor("amount", usd(210), { quote: rest })?.message).toMatch(
-      /names no amount and authorization/,
-    );
-  });
-
-  // Site: `own(auth, "domain")` in `quoteFrom`.
-  it("reads no authorization domain from the quote's prototype", () => {
-    const { domain, ...auth } = HONEST().authorization;
-    const refusal = refusalFor("domain", domain, {
-      quote: { amount: usd(210), authorization: auth },
-    });
-    expect(refusal?.message).toMatch(/not the one this client derives/);
-  });
-
-  // The other direction, end to end, so no fix here can be "always refuse" and
-  // so the four arguments above are the ones a real submission passes.
-  it("still signs a quote the node really did state", async () => {
+  // The other direction, end to end, so no fix here can be "always refuse".
+  it("still posts against a quote the node really did state", async () => {
     const { client: c, calls } = client([
       marketRoute(),
       [
         /\/v1\/jobs$/,
         (n, body) => {
-          const order = body as { job_id: string; expires_at: number };
+          const order = body as { job_id: string };
           return n === 1
-            ? json(QUOTE(order.job_id, BigInt(order.expires_at)), 402)
+            ? json(QUOTE(), 402)
             : json({ job_id: order.job_id, task_cid: "bafytask", tx_hash: "0x1" }, 201);
         },
       ],
       ...baseRoutes(),
     ]);
     await expect(c.submit({ model: "m", input: "hi", provider: 1 })).resolves.toBeDefined();
-    expect(calls.filter((call) => "auth_sig" in ((call.body ?? {}) as object))).toHaveLength(1);
+    expect(funded(calls)).toHaveLength(1);
   });
 });
 
@@ -2690,9 +2603,9 @@ describe("client — the constructor's options record", () => {
  * the same severity: a **presence check and a value read that both walk the
  * prototype chain**, over the four addresses this client signs against and the
  * token figures every payment is signed under. `usdc` is the `verifyingContract`
- * of the payment authorization, and `token_domain` is its name and version.
+ * of the deposit authorization, and `token_domain` is its name and version.
  */
-describe("terms — the chain context a payment authorization is signed against", () => {
+describe("terms — the chain context a deposit authorization is signed against", () => {
   const CONTRACTS = CHAIN.contracts;
   const chainRoute = (body: unknown): Route => [/\/evm\/chain/, () => json(body)];
   const rest = (): Route[] => [
@@ -3022,9 +2935,7 @@ describe("batches — the gas fee the whole file's payments are signed over", ()
   // Site: `own(body, "quote")` in `Batches.fees`.
   //
   // Both values flow to `payLine`, where `amount = cap + cap*feeBps/10000 +
-  // gasFee` is the **value** every line in the file authorizes. Measured
-  // against `dist/` on the unguarded file: *refusal thrown: NONE; signed
-  // authorization value: 1000000000000000000000000.*
+  // gasFee` is what every line in the file locks.
   it("prices no batch from a quote block the 402 body never carried", async () => {
     const h = quoting({});
     await pollutedAsync("quote", { gas_fee: "1000000000000000000", fee_bps: 0 }, async () => {
@@ -3032,14 +2943,14 @@ describe("batches — the gas fee the whole file's payments are signed over", ()
         h.client.batches.submit(line, "1h", { providers: [1] }),
       ).rejects.toThrow(/the quote carries no gas_fee/);
     });
-    // The consequence: nothing was uploaded and nothing was authorized.
+    // The consequence: nothing was uploaded.
     expect(h.calls.filter((c) => c.url.endsWith("/v1/files"))).toHaveLength(0);
     expect(created(h.calls)).toHaveLength(0);
   });
 
   // Site: `own(quote, "gas_fee")` in `Batches.fees`.
   it("prices no batch from a gas fee the quote never named", async () => {
-    const h = quoting({ quote: { authorization: {} } });
+    const h = quoting({ quote: {} });
     await pollutedAsync("gas_fee", "1000000000000000000000000", async () => {
       await expect(
         h.client.batches.submit(line, "1h", { providers: [1] }),
@@ -3050,9 +2961,9 @@ describe("batches — the gas fee the whole file's payments are signed over", ()
 
   // Site: `own(quote, "fee_bps")` in `Batches.fees`. The same reasoning and the
   // same consequence: the rate rides on top of every line's cap, so a prototype
-  // that gets to name it names part of the authorized value.
+  // that gets to name it names part of the locked amount.
   it("prices no batch from a fee rate the quote never named", async () => {
-    const h = quoting({ quote: { authorization: {}, gas_fee: usd(7) } });
+    const h = quoting({ quote: { gas_fee: usd(7) } });
     await pollutedAsync("fee_bps", 1000, async () => {
       await expect(
         h.client.batches.submit(line, "1h", { providers: [1] }),
@@ -3062,9 +2973,9 @@ describe("batches — the gas fee the whole file's payments are signed over", ()
   });
 
   // The other direction: a gas fee the quote really does name is still read and
-  // still added to every line's authorized value.
-  it("still signs a payment over a gas fee the quote states", async () => {
-    // Differential rather than absolute: the authorized value is
+  // still added to every line's locked amount.
+  it("still prices a line over a gas fee the quote states", async () => {
+    // Differential rather than absolute: the locked amount is
     // `capFor(terms) + gasFee`, and asserting the *difference* two quotes make
     // pins the value that was read rather than the arithmetic around it — an
     // assertion on one total passes just as well for a fee that was ignored.
@@ -3695,11 +3606,6 @@ describe("files — the retry pause a gateway read takes", () => {
 // ---------------------------------------------------------------------------
 
 describe("signer — the key a wallet is built from and the wallet it discovers", () => {
-  // The payment authorization has no caller-supplied overrides left: every
-  // member but the amount is derived from the order and the `ChainContext`, so
-  // `signPaymentAuthorization` reads nothing off its args record that a
-  // prototype could answer for.
-
   // Site: `own(options, "keyEnv")` in the `PrivateKeySigner` constructor.
   it("consults no environment variable the caller never named", () => {
     polluted("keyEnv", "STOLEN_ENV", () => {
@@ -3889,17 +3795,17 @@ describe("browser-wallet — the global a discovery dispatch reaches", () => {
 });
 
 // ---------------------------------------------------------------------------
-// src/client.ts — the sealed line a payment is authorized from
+// src/client.ts — the sealed line a row is priced from
 // ---------------------------------------------------------------------------
 
-describe("client — the sealed line payLine authorizes", () => {
-  // Site: `stated("terms")` / `"url"` / `"order"` / `"container"` / `"jobId"`
-  // in `Client.payLine`.
+describe("client — the sealed line payLine prices", () => {
+  // Site: `stated("terms")` / `"url"` / `"order"` / `"container"` in
+  // `Client.payLine`.
   //
   // Guarded on the public-and-reachable reasoning: `payLine` is a public
   // `Client` member and `SealedLine` is on the barrel. `capFor(terms)` is the
-  // cap half of `amount`, which is the value the line authorizes.
-  it("authorizes no line whose members come from the prototype", async () => {
+  // cap half of `amount`, which is what the line locks.
+  it("prices no line whose members come from the prototype", async () => {
     const { client: c } = client(baseRoutes());
     const ctx = await c.chainContext();
     const honest = await c.sealLine({
@@ -3915,10 +3821,10 @@ describe("client — the sealed line payLine authorizes", () => {
     // Every member moved onto the prototype: read bare, the row builds from it
     // exactly as if the caller had passed one.
     const bare = Object.create(honest) as typeof honest;
-    await expect(c.payLine(bare, 7n, ctx, 0n)).rejects.toThrow();
+    expect(() => c.payLine(bare, 7n, ctx, 0n)).toThrow();
   });
 
-  it("still authorizes a line that states its own members", async () => {
+  it("still prices a line that states its own members", async () => {
     const { client: c } = client(baseRoutes());
     const ctx = await c.chainContext();
     const line = await c.sealLine({
@@ -3931,15 +3837,15 @@ describe("client — the sealed line payLine authorizes", () => {
       provider: 1,
       ctx,
     });
-    const amountOf = async (fee: bigint): Promise<bigint> =>
-      parseUsd(((await c.payLine(line, fee, ctx, 0n)) as { amount: string }).amount, 6);
-    const row = await c.payLine(line, 7n, ctx, 0n);
+    const amountOf = (fee: bigint): bigint =>
+      parseUsd((c.payLine(line, fee, ctx, 0n) as { amount: string }).amount, 6);
+    const row = c.payLine(line, 7n, ctx, 0n);
     expect(row.url).toBe("/v1/responses");
     expect(row.container).toBe(toBase64(line.container));
     // Differential, for the reason the batch gas-fee test is: the total is
     // `capFor(terms) + gasFee`, and asserting the difference two fees make pins
     // the terms that were actually read rather than the arithmetic around them.
-    expect((await amountOf(9n)) - (await amountOf(7n))).toBe(2n);
+    expect(amountOf(9n) - amountOf(7n)).toBe(2n);
   });
 });
 

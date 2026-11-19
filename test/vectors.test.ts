@@ -11,6 +11,7 @@ import {
   OrderTerms,
   RECEIVE_AUTHORIZATION_TYPES,
   SESSION_TYPES,
+  WITHDRAW_TYPES,
   orderDomain,
   paymentDomain,
 } from "../src/terms.js";
@@ -186,28 +187,51 @@ describe("signing-v3 tables and digests", () => {
       expect(await recoverAgainstVector("cancel", signature)).toBe(LOCAL.address);
     });
 
-    it("signPaymentAuthorization lands on the payment-authorization digest", async () => {
+    it("signDepositAuthorization lands on the payment-authorization digest", async () => {
       const m = message("payment-authorization");
-      const signature = await new PrivateKeySigner(LOCAL_KEY).signPaymentAuthorization({
-        amount: m.value as bigint,
-        jobId: m.nonce as `0x${string}`,
-        expiresAt: (m.validBefore as bigint) - 1n,
-        ctx: CTX,
-      });
+      const signature = await new PrivateKeySigner(LOCAL_KEY).signDepositAuthorization(
+        m.value as bigint,
+        m.nonce as `0x${string}`,
+        m.validBefore as bigint,
+        CTX,
+      );
       expect(await recoverAgainstVector("payment-authorization", signature)).toBe(LOCAL.address);
       // `from` is signed, so the digest is reachable by exactly one wallet —
       // which is what the assertion above is worth only if this holds.
       expect(m.from).toBe(LOCAL.address);
     });
 
-    it("nonce is the job id, and the payee is the JobRegistry", () => {
-      // One authorization per job: the token's own nonce table then makes it
-      // single-use, and only the payee can execute it, so an authorization
-      // quoted for another job or another payee funds nothing here.
+    it("the payee is the JobRegistry, valid from 0", () => {
+      // Only the payee can execute it, so an authorization made out to anyone
+      // else funds nothing here.
       const m = message("payment-authorization");
-      expect(m.nonce).toBe(CASES["payment-authorization"]!.extra?.job_id);
       expect(m.to).toBe(CTX.jobRegistry);
       expect(m.validAfter).toBe(0n);
+    });
+
+    describe("withdraw", () => {
+      it("matches this SDK's table member for member, on the JobRegistry's domain", () => {
+        expect(WITHDRAW_TYPES).toEqual(localTypes("withdraw"));
+        expect(orderDomain(CTX)).toEqual(CASES.withdraw!.typed_data.domain);
+      });
+
+      it("signWithdraw lands on the withdraw digest", async () => {
+        const m = message("withdraw");
+        const signature = await new PrivateKeySigner(LOCAL_KEY).signWithdraw(
+          m.amount as bigint,
+          m.issuedAt as bigint,
+          CTX,
+        );
+        expect(await recoverAgainstVector("withdraw", signature)).toBe(LOCAL.address);
+        expect(
+          hashTypedData({
+            domain: CASES.withdraw!.typed_data.domain,
+            types: localTypes("withdraw"),
+            primaryType: "Withdraw",
+            message: m,
+          } as Parameters<typeof hashTypedData>[0]),
+        ).toBe(CASES.withdraw!.digest);
+      });
     });
 
     it("the file's own payloads hash to the digests it publishes", () => {

@@ -10,9 +10,10 @@ interface Signer {
   readonly address: Address;
   signOrderV2(terms: OrderTerms, ctx: ChainContext): Promise<Hex>;
   signCancel(jobId: Hex, issuedAt: bigint, ctx: ChainContext): Promise<Hex>;
-  signPaymentAuthorization(args: {
-    amount: bigint; jobId: Hex; expiresAt: bigint; ctx: ChainContext;
-  }): Promise<Hex>;
+  signDepositAuthorization(
+    amount: bigint, nonce: Hex, validBefore: bigint, ctx: ChainContext,
+  ): Promise<Hex>;
+  signWithdraw(amount: bigint, issuedAt: bigint, ctx: ChainContext): Promise<Hex>;
   signNonce(nonce: string, chainId: number): Promise<Hex>;
   signMessage(message: string): Promise<Hex>;
 }
@@ -33,7 +34,8 @@ synchronous.
 | `signNonce` | `VorqSession { address, nonce }` under the domain `"VORQ Session"`, version `"1"`, on `chainId`. The session handshake. |
 | `signOrderV2` | `Order { c, modelId, slaSecs, rateIn, rateOut, unitsIn, unitsOut, designated, expiresAt }` under `"VORQ Jobs"`, version `"2"`, verifying contract `ctx.jobRegistry`. |
 | `signCancel` | `Cancel { jobId, issuedAt }` under the same domain as orders. |
-| `signPaymentAuthorization` | EIP-3009 `ReceiveWithAuthorization` under the payment token's own domain (`ctx.tokenDomain`, `ctx.usdc`): `from` the wallet, `to` `ctx.jobRegistry`, `value` the amount, `validAfter` 0, `validBefore` `expiresAt + 1`, `nonce` the job id. |
+| `signDepositAuthorization` | A deposit: EIP-3009 `ReceiveWithAuthorization` under the payment token's own domain (`ctx.tokenDomain`, `ctx.usdc`): `from` the wallet, `to` `ctx.jobRegistry`, `value` the amount in atomic units, `validAfter` 0, `validBefore` and `nonce` as given. The client passes a random 32-byte nonce and a deadline one hour out. |
+| `signWithdraw` | `Withdraw { amount, issuedAt }` (`uint128`, `uint64`) under the same domain as orders. |
 | `signMessage` | An EIP-191 `personal_sign` message. Used by `deriveResultCipher`. |
 
 Implement `Signer` yourself only to keep the key elsewhere (a KMS, an HSM, a remote signer). Use a

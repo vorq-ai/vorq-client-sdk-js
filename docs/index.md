@@ -25,8 +25,9 @@ routing terms and ciphertext, never a prompt or an output.
 - Browser wallets over EIP-6963 (`BrowserWalletSigner`) and local keys for Node
   (`PrivateKeySigner`).
 - A result key derived from the wallet (`deriveResultCipher`): one key to hold and back up.
-- Prices and amounts are USD decimal strings (rates in USD per 1M units); payment by EIP-3009
-  authorization in the deployment's USDC token; costs computed locally to the atomic unit the chain charges.
+- Prices and amounts are USD decimal strings (rates in USD per 1M units); jobs are paid from a
+  prepaid USDC balance, topped up by gasless EIP-3009 deposits (the wallet never needs ETH) and
+  withdrawable at any time; costs computed locally to the atomic unit the chain charges.
 - Durable jobs: store the id, re-attach later with `client.job(id)`.
 - Sealed batches (`client.batches`).
 - `sealingFetch`, which runs the stock `openai` package's Responses API over the sealed flow.

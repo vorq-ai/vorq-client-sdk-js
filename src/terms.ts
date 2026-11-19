@@ -126,7 +126,7 @@ export class ChainContext {
     // **Own properties only on this body and its `contracts` block** — the
     // package rule (`own.ts`), and it guards a *signing domain*. Every one of
     // the four addresses below is signed against: `usdc` is the
-    // `verifyingContract` of the payment authorization this client puts its
+    // `verifyingContract` of the deposit authorization this client puts its
     // signature on. Read bare, a `/evm/chain` answer that omits `usdc` is
     // answered by a polluted `Object.prototype.usdc` — and the presence
     // check on the line below is answered by the same prototype, so it does not
@@ -211,7 +211,7 @@ export function sessionDomain(chainId: number): TypedDataDomain {
   return Object.freeze({ ...SESSION_DOMAIN, chainId });
 }
 
-/** The JobRegistry's domain — `Order` and `Cancel` both live here. */
+/** The JobRegistry's domain — `Order`, `Cancel` and `Withdraw` live here. */
 export function orderDomain(ctx: ChainContext): TypedDataDomain {
   return {
     name: ORDER_DOMAIN_NAME,
@@ -294,8 +294,20 @@ export const CANCEL_TYPES = {
 } as const;
 
 /**
- * The escrow payment: EIP-3009 `ReceiveWithAuthorization`. Only the payee — the JobRegistry — can
- * execute it, `nonce` is the job id, and it is valid through the order's `expiresAt`.
+ * `Withdraw(uint128 amount,uint64 issuedAt)` — the owner taking `amount` out of
+ * the prepaid balance. On the JobRegistry's domain, beside `Cancel`.
+ */
+export const WITHDRAW_TYPES = {
+  Withdraw: [
+    { name: "amount", type: "uint128" },
+    { name: "issuedAt", type: "uint64" },
+  ],
+} as const;
+
+/**
+ * A deposit: EIP-3009 `ReceiveWithAuthorization` into the prepaid balance. Only
+ * the payee — the JobRegistry — can execute it, and its random `nonce` makes it
+ * single-use in the token's own nonce table.
  */
 export const RECEIVE_AUTHORIZATION_TYPES = {
   ReceiveWithAuthorization: [

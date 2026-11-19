@@ -790,14 +790,11 @@ export function sealingFetch(options: SealingFetchOptions = {}): SealingFetch {
     // `Cancel(jobId, issuedAt)` and there is exactly one place in this SDK that
     // authors it.
     //
-    // **The answer is a relay receipt, not a job.** The node's cancel route ends
-    // in `relay(chain, …, reply, 200, { job_id: jobId })`, so the body is
-    // `{job_id, tx_hash}` — no `id`, no `status`, no terms.
+    // **The answer is `{job_id}`, not a job** — no `id`, no `status`, no terms.
     //
-    // `cancelled` is asserted rather than re-read, and it is not optimism:
-    // `relay` waits for the transaction receipt before it answers, so a `200`
-    // here means the chain has ended this job. A follow-up `GET` would cost a
-    // round trip and open a window for a state the cancel did not produce.
+    // `cancelled` is asserted rather than re-read: a `200` means the node has
+    // ended the order. A follow-up `GET` would cost a round trip and open a
+    // window for a state the cancel did not produce.
     const response = await client.job(id).cancelRequest();
     let receipt: unknown = null;
     try {

@@ -20,8 +20,8 @@ const handle = await client.submit({
 ```
 
 `unitsOut: 0` matters. Without it, a request that names no output-token ceiling is priced as a
-text job with a default ceiling of 4096 output units, and your payment authorization covers that
-at the order's output rate. See [Units](../reference/submit.md#units).
+text job with a default ceiling of 4096 output units, and the amount locked from your balance
+covers that at the order's output rate. See [Units](../reference/submit.md#units).
 
 ## Read the vectors
 

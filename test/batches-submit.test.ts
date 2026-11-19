@@ -1,8 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Address } from "viem";
 
 import { INLINE_MAX_BYTES } from "../src/crypto/domains.js";
-import { EscrowKeyUnverified, ValidationError, VorqError } from "../src/errors.js";
+import { EscrowKeyUnverified, InsufficientBalance, ValidationError, VorqError } from "../src/errors.js";
 import { isUsd } from "../src/money.js";
 import { Verifier } from "../src/verify.js";
 // Reuse the harness the submission suites already share — do not build a second one.
@@ -13,8 +12,8 @@ import {
   json,
   manifestRows,
   marketCandidate,
+  depositSignerOf,
   openEnvelope,
-  paymentSignerOf,
 } from "./helpers/submit-harness.js";
 import {
   ESCROW_ACTIVE,
@@ -53,8 +52,6 @@ const mockVerifier = () =>
     fetch: scriptedNode({ entries: () => ESCROW_ACTIVE }).fetch,
   });
 
-/** A hostile payee a node might name in its quote. A valid address. */
-const HOSTILE_TO = "0xdeadbeef".padEnd(42, "0") as Address;
 
 describe("Batches.submit — refusals before anything is sealed", () => {
   /**
@@ -684,33 +681,59 @@ describe("Batches.submit — the happy path", () => {
     );
   });
 
-  it("signs each payment against ctx, never against anything the node said", async () => {
-    const h = batchHarness({ gasFee: 7n, quoteTo: HOSTILE_TO });
+  it("signs nothing per line: a row carries the amount it locks and no authorization", async () => {
+    const h = batchHarness({ gasFee: 7n, allocation: AT_CEILINGS });
     await h.client.batches.submit([{ body: PRICED }, { body: PRICED }], "1h", { providers: [1] });
-    // Cached from the submit — this costs no extra request.
-    const ctx = await h.client.chainContext();
-    expect(HOSTILE_TO.toLowerCase()).not.toBe(ctx.jobRegistry.toLowerCase());
-
-    // **The load-bearing assertion is the first of the two, and only the
-    // first.** `batches.ts` never reads the quote's `authorization` block at all
-    // — it takes `gas_fee` and `fee_bps` and nothing else — so no mutation of
-    // the source can make a signature carry the hostile payee, and the second
-    // recovery is a *control*, not a pin. The fixture stays because it documents
-    // the threat the design refuses, but do not "simplify" the
-    // recovery-to-`owner` assertion believing the decoy covers it: the decoy
-    // cannot fail, and recovery under `ctx.jobRegistry` is what dies when
-    // `payLine` signs anything else.
-    //
-    // Recovery is also the only assertion that can tell what an authorization
-    // actually authorized: `ecrecover` never fails, it returns a different
-    // address, so a signature over the node's payee would be perfectly valid and
-    // belong to a stranger — and the wrongness would surface as an unclaimable
-    // job rather than as an error.
     for (const row of manifestRows(h.uploads[0]!)) {
-      const owner = (row.owner as string).toLowerCase();
-      expect((await paymentSignerOf(row, ctx, ctx.jobRegistry)).toLowerCase()).toBe(owner);
-      expect((await paymentSignerOf(row, ctx, HOSTILE_TO)).toLowerCase()).not.toBe(owner);
+      expect(row).not.toHaveProperty("auth_sig");
+      expect(row.amount).toBe("0.008282");
     }
+    // A covered balance deposits nothing.
+    expect(h.deposits).toHaveLength(0);
+  });
+
+  /**
+   * Two lines at 8282 atomic each (the derivation above) lock 16564; with 10000
+   * available the shortfall is 6564. `deposit(shortfall)` signs it plus the
+   * harness's 2000 deposit fee: one authorization for 8564 = "0.008564".
+   */
+  it("deposits the batch's shortfall once, before the upload", async () => {
+    const h = batchHarness({ gasFee: 7n, allocation: AT_CEILINGS, available: 10_000 });
+    await h.client.batches.submit([{ body: PRICED }, { body: PRICED }], "1h", { providers: [1] });
+    expect(h.deposits).toHaveLength(1);
+    const deposit = h.deposits[0]!;
+    expect(deposit.value).toBe("0.008564");
+    const ctx = await h.client.chainContext();
+    expect(await depositSignerOf(deposit, ctx)).toBe(h.client.signer!.address);
+    expect(h.ledger.available).toBe(16_564n);
+    // The deposit went out before the file did.
+    const order = h.calls.map((c) => c.url);
+    const deposited = order.findIndex((u) => u.endsWith("/v1/deposits"));
+    const uploaded = order.findIndex((u) => u.endsWith("/v1/files"));
+    expect(deposited).toBeGreaterThan(-1);
+    expect(deposited).toBeLessThan(uploaded);
+  });
+
+  it("with autoDeposit off, raises InsufficientBalance and uploads nothing", async () => {
+    const h = batchHarness({
+      gasFee: 7n,
+      allocation: AT_CEILINGS,
+      available: 10_000,
+      clientOptions: { autoDeposit: false },
+    });
+    const refusal = await h.client.batches
+      .submit([{ body: PRICED }, { body: PRICED }], "1h", { providers: [1] })
+      .catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(InsufficientBalance);
+    expect(refusal).toMatchObject({
+      type: "insufficient_balance",
+      balance: "0.01",
+      required: "0.016564",
+      shortfall: "0.006564",
+    });
+    expect(h.deposits).toHaveLength(0);
+    expect(h.uploads).toHaveLength(0);
+    expect(h.creates).toHaveLength(0);
   });
 
   it("refuses a non-402 answer to the terms-only body, having uploaded nothing", async () => {

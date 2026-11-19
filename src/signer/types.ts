@@ -26,13 +26,21 @@ export interface Signer {
 
   signCancel(jobId: Hex, issuedAt: bigint, ctx: ChainContext): Promise<Hex>;
 
-  /** The escrow payment. Every member but `amount` is derived from the order and the context. */
-  signPaymentAuthorization(args: {
-    amount: bigint;
-    jobId: Hex;
-    expiresAt: bigint;
-    ctx: ChainContext;
-  }): Promise<Hex>;
+  /**
+   * A deposit into the prepaid balance: EIP-3009 `ReceiveWithAuthorization`
+   * from this wallet to `ctx.jobRegistry` for `amount` atomic units, under the
+   * payment token's own domain. `nonce` is a fresh random 32 bytes and
+   * `validBefore` unix seconds.
+   */
+  signDepositAuthorization(
+    amount: bigint,
+    nonce: Hex,
+    validBefore: bigint,
+    ctx: ChainContext,
+  ): Promise<Hex>;
+
+  /** `Withdraw(amount, issuedAt)` on the JobRegistry's domain: take `amount` atomic units out of the balance. */
+  signWithdraw(amount: bigint, issuedAt: bigint, ctx: ChainContext): Promise<Hex>;
 
   /** Sign a session-handshake nonce under the off-chain domain of `chainId` — the deployment's, from `GET /auth/nonce`. */
   signNonce(nonce: string, chainId: number): Promise<Hex>;

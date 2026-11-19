@@ -458,9 +458,9 @@ describe("models.list walks the catalog", () => {
       [
         /\/v1\/jobs$/,
         (n, body) => {
-          const { job_id, expires_at } = body as { job_id: string; expires_at: number };
+          const { job_id } = body as { job_id: string };
           return n === 1
-            ? json(QUOTE(job_id, BigInt(expires_at)), 402)
+            ? json(QUOTE(), 402)
             : json({ job_id, task_cid: "bafy", tx_hash: "0x1" });
         },
       ],

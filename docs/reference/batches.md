@@ -18,9 +18,9 @@ A how-to is in [Submit a batch](../guides/submit-a-batch.md).
 
 ## `submit`
 
-Every line is sealed, signed and paid for locally, then the file is uploaded once and the batch
-created. Each line is a complete submission with its own order, sealed payload, payment and job
-id.
+Every line is sealed, signed and priced locally, the prepaid balance is topped up if it is
+short, then the file is uploaded once and the batch created. Each line is a complete submission
+with its own order, sealed payload, locked `amount` and job id.
 
 **`requests`** is an array of lines or a JSONL string of them. A line:
 
@@ -68,6 +68,9 @@ raised and nothing is signed.
 
 Pricing takes one request: the first line's terms are posted to read the gas fee and fee rate,
 and every line's amount is computed locally as `cap + floor(cap × feeBps / 10000) + gasFee`.
+The amounts are summed and checked against `client.balance()`; a shortfall is deposited once,
+with one wallet signature, before the upload (`client.deposit(shortfall)`). On a client built
+with `autoDeposit: false` a shortfall raises `InsufficientBalance` and nothing is uploaded.
 Batch lines are never `confidential`.
 
 Raised before anything is uploaded (`ValidationError` unless noted): a client without `signer`

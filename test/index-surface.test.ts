@@ -10,7 +10,8 @@ import * as sdk from "../src/index.js";
  */
 const SURFACE = [
   "AuthenticationError", "BatchFailed", "BrowserWalletSigner", "Client", "ContainerError",
-  "DerivedKeyMismatch", "EmbeddingResult", "EscrowKeyUnverified", "JobError", "JobFailed",
+  "DerivedKeyMismatch", "EmbeddingResult", "EscrowKeyUnverified", "InsufficientBalance",
+  "JobError", "JobFailed",
   "JobHandle", "MediaResult", "NoWalletError", "NotFoundError", "PrivateKeySigner",
   "ResultIntegrityError", "SealedBoxCipher", "StateConflictError", "TextResult",
   "TransportError", "ValidationError", "VerificationError", "Verifier", "VorqError",
@@ -42,6 +43,10 @@ const ERRORS: ReadonlyArray<readonly [string, () => sdk.VorqError]> = [
   ["WaitTimeout", () => new sdk.WaitTimeout("x")],
   ["JobFailed", () => new sdk.JobFailed("x", { errorType: "provider_fail" })],
   ["BatchFailed", () => new sdk.BatchFailed("x")],
+  [
+    "InsufficientBalance",
+    () => new sdk.InsufficientBalance("x", { balance: "1", required: "3", shortfall: "2" }),
+  ],
   ["ContainerError", () => new sdk.ContainerError("too_short", "x")],
   ["DerivedKeyMismatch", () => new sdk.DerivedKeyMismatch("x")],
   ["NoWalletError", () => new sdk.NoWalletError("x")],
@@ -70,6 +75,9 @@ it("every error class descends from VorqError", () => {
   expect(new sdk.DerivedKeyMismatch("x").type).toBe("derived_key_mismatch");
   expect(new sdk.NoWalletError("x").type).toBe("no_wallet");
   expect(new sdk.WalletRejectedError("x").type).toBe("wallet_rejected");
+  expect(
+    new sdk.InsufficientBalance("x", { balance: "1", required: "3", shortfall: "2" }),
+  ).toMatchObject({ type: "insufficient_balance", balance: "1", required: "3", shortfall: "2" });
   // The loop above is only the taxonomy if it covers it. Every exported class
   // that descends from `VorqError` must have a construction in `ERRORS`, so a
   // new error added to the barrel and not to this file reddens here rather
@@ -114,7 +122,7 @@ it("results are real classes", () => {
  */
 it("keeps the aggregate types on the barrel", () => {
   const barrel = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
-  for (const name of ["JobsSummary", "JobsSummaryModel"]) {
+  for (const name of ["JobsSummary", "JobsSummaryModel", "Balance"]) {
     expect(barrel).toMatch(new RegExp(`\\b${name}\\b`));
   }
 });
@@ -143,13 +151,16 @@ async function pinTypeOnlySurface(): Promise<void> {
   const memo: sdk.SealMemo = { records: new Map(), modelIds: new Map() };
   const sealArgs: sdk.SealLineArgs = { ...({} as sdk.SealLineArgs), ctx, memo };
   const line: sdk.SealedLine = await client.sealLine(sealArgs);
-  await client.payLine(line, 0n, ctx, 0n);
+  client.payLine(line, 0n, ctx, 0n);
   const options: sdk.RequestOptions = { retry: false };
   await client.json("GET", "/v1/models", options);
   await client.request("GET", "/v1/models", options);
   const summary: sdk.JobsSummary = await client.jobsSummary({ owner: "0x0" });
   const perModel: sdk.JobsSummaryModel = summary.byModel[0];
-  void [models, model, ctx, allowlist, entry, memo, sealArgs, line, options, summary, perModel];
+  const funds: sdk.Balance = await client.balance();
+  await client.deposit(funds.depositFee);
+  await client.withdraw(funds.available);
+  void [models, model, ctx, allowlist, entry, memo, sealArgs, line, options, summary, perModel, funds];
 }
 
 void pinTypeOnlySurface;

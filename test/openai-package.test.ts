@@ -94,7 +94,7 @@ function node(options: NodeOptions = {}): Route[] {
         if (options.submitStatus !== undefined) return wire(options.submitStatus);
         const order = body as { job_id: string; expires_at: number };
         const jobId = order.job_id;
-        if (n === 1) return json(QUOTE(jobId, BigInt(order.expires_at)), 402);
+        if (n === 1) return json(QUOTE(), 402);
         return json({ job_id: jobId, task_cid: "bafytask", tx_hash: "0x1" }, 201);
       },
     ],

@@ -4,8 +4,8 @@ description: Install @vorq-ai/client-sdk, submit a first job from Node and read 
 ---
 
 > **VORQ runs on Base.** Jobs are paid in USDC on Base. Fund your wallet before step 3: buy or
-> withdraw USDC to the Base network, or bridge it. No ETH is needed: the coordinator pays the
-> gas.
+> withdraw USDC to the Base network, or bridge it. No ETH is needed: deposits into your prepaid
+> balance are gasless signatures the coordinator relays.
 
 This walks one path end to end: a Node script, a local wallet key, one text job. For a web page,
 pass a [browser wallet](./guides/use-a-browser-wallet.md) as the client's `signer`.
@@ -25,7 +25,7 @@ export VORQ_WALLET_KEY=0x…   # the dedicated wallet's private key
 ```
 
 Use a **dedicated wallet funded with your inference budget**, never a main wallet's key. The
-client signs the session handshake, every order and every payment with it, and derives the key
+client signs the session handshake, every order and every deposit with it, and derives the key
 your results are sealed to from one signature, so the wallet is the only thing to back up.
 
 ## 3. Submit a job and read the result
@@ -64,8 +64,10 @@ node quickstart.mjs
   the first provider's own ask. A `batch` job usually takes minutes to a few hours; 24 hours is
   the maximum. To cap what you pay, pass `maxRateIn` and `maxRateOut`; see
   [Pricing and payment](./concepts/pricing-and-payment.md).
-- `submit` seals the input, signs the order and the payment authorization, and posts the job. It
-  returns as soon as the job is on the book.
+- `submit` seals the input, signs the order and posts the job. Jobs are paid from a prepaid
+  balance: on the first job `submit` deposits what it needs (plus a flat deposit fee) with one
+  more signature; later jobs draw on what is left. It returns as soon as the job is on the book.
+  `client.balance()` shows the balance and `client.withdraw(amount)` takes it back.
 - `result()` polls until the job ends, fetches the sealed result and opens it. A job that fails
   raises `JobFailed`; a wait that runs out raises `WaitTimeout`, and the job keeps running.
 

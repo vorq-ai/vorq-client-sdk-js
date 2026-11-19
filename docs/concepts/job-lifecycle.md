@@ -29,16 +29,22 @@ the OpenAI-compatible transport defaults to `1h`.
 2. **Sign the order.** The terms (model, window, rates, unit counts, recipient, expiry and a
    commitment to the sealed bytes) are signed as EIP-712 typed data. The job id is derived from
    your address and that commitment, so the client knows it before anything is sent.
-3. **Quote.** The terms alone are posted; the coordinator answers `402` with the amount to
-   authorize.
-4. **Pay and post.** The client signs an EIP-3009 payment authorization for that amount and
-   posts it with the sealed container. Containers too large to travel inline are uploaded first
-   and referenced by content id.
+3. **Quote.** The terms alone are posted; the coordinator answers `402` with the amount the job
+   locks, your available balance, and the deposit to make first when the balance is short.
+4. **Deposit, if short.** The client signs one gasless deposit authorization for exactly the
+   quoted deposit and the coordinator relays it (with `autoDeposit: false`, the client raises
+   `InsufficientBalance` instead). See [Pricing and payment](./pricing-and-payment.md#the-prepaid-balance).
+5. **Post.** The terms, the amount and the sealed container are posted together. Containers too
+   large to travel inline are uploaded first and referenced by content id.
 
-If the gas fee moves between quote and post, the coordinator answers with a new quote and the
-client re-signs the payment only, up to three times. If the connection drops during the post,
-the client asks whether the job it already knows the id of was posted, and re-sends once only
-if it was not. A submission is never blindly retried, so one call never pays twice.
+If the gas fee or the balance moves between quote and post, the coordinator answers with a new
+quote and the client posts again against it, depositing first if it now names a deposit, up to
+three times. If the connection drops during the post, the client asks whether the job it
+already knows the id of was posted, and re-sends once only if it was not. A submission is never
+blindly retried, so one call never pays twice.
+
+The amount is locked from your balance when a provider claims the job, and what the job did not
+use returns to the balance when it ends.
 
 ## States
 
@@ -55,7 +61,7 @@ and `JobFailed.errorType` carries it: `provider_fail`, `reclaim`, `cancelled` or
 [Errors](../reference/errors.md#jobfailed)).
 
 An order carries an expiry: its window plus a settlement margin (one hour by default), capped at
-24 hours from signing. The payment authorization is valid until the same moment.
+24 hours from signing. An order past its expiry can no longer be claimed.
 
 ## Cancelling
 

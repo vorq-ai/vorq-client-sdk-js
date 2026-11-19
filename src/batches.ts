@@ -3,11 +3,10 @@
  *
  * A batch fans many requests out at once, and **every line is sealed before
  * anything is uploaded**. Each line is a complete submission — the same order,
- * the same container v1, the same payment authorization that `POST /v1/jobs` takes —
+ * the same container v1 and the same locked `amount` that `POST /v1/jobs` takes —
  * so the file the coordinator receives carries routing terms and ciphertext and
  * nothing a reader could act on. The coordinator splits it, files each
- * container, and lands the lines on chain in as few transactions as the block
- * will take.
+ * container, and holds each line as an order until a provider claims it.
  *
  * The JSONL is not a payload the node keeps; it is a file of sealed envelopes it
  * pins like every other container. Results come back sealed to this client's own
@@ -38,7 +37,14 @@
  * what `scalars.ts` is.
  */
 
-import { BatchFailed, EscrowKeyUnverified, ValidationError, VorqError, WaitTimeout } from "./errors.js";
+import {
+  BatchFailed,
+  EscrowKeyUnverified,
+  InsufficientBalance,
+  ValidationError,
+  VorqError,
+  WaitTimeout,
+} from "./errors.js";
 import { defaultSleep, monotonicNow } from "./jobs.js";
 import { own } from "./own.js";
 import { checkInput } from "./params.js";
@@ -54,7 +60,7 @@ import { UINT32_MAX, parseCeiling } from "./terms.js";
 import { asBigInt } from "./scalars.js";
 import { declareUnits } from "./units.js";
 import { batchPollInterval, normalizeSla, slaSeconds } from "./sla.js";
-import type { SealLineArgs, SealMemo, SealedLine, VorqFile } from "./client.js";
+import type { Balance, SealLineArgs, SealMemo, SealedLine, VorqFile } from "./client.js";
 import type { Models } from "./models.js";
 import type { Cipher, Signer } from "./signer/types.js";
 import type { ChainContext } from "./terms.js";
@@ -86,7 +92,10 @@ export interface BatchClient {
     gasFee: bigint,
     ctx: ChainContext,
     feeBps: bigint,
-  ): Promise<Record<string, unknown>>;
+  ): Record<string, unknown>;
+  balance(): Promise<Balance>;
+  deposit(amount: string): Promise<Balance>;
+  readonly autoDeposit: boolean;
   readonly models: Models;
   readonly signer: Signer | null;
   readonly cipher: Cipher | null;
@@ -293,6 +302,9 @@ export class Batches {
    * One network round trip prices the whole batch: the chain's `gas_fee` is
    * read once, from the `402` quote for the first line's own order, and every
    * line's cap is computed locally from the rates and unit counts it signs.
+   * Before the file is uploaded the lines' summed lock is checked against
+   * `balance()`, and a shortfall is deposited once — or, on a client built
+   * with `autoDeposit: false`, raises `InsufficientBalance`.
    */
   async submit(
     requests: Record<string, unknown>[] | string,
@@ -514,12 +526,12 @@ export class Batches {
     // to encrypt. The quote below is asked with the first line's own signed
     // order, which only exists because the loop above has already run.
     const { gasFee, feeBps } = await this.fees(sealed[0] as SealedLine, ctx);
-    const rows: string[] = [];
-    for (const line of sealed) {
-      // Serialized as it is produced.
-      rows.push(JSON.stringify(await this.client.payLine(line, gasFee, ctx, feeBps)));
-    }
-    const content = `${rows.join("\n")}\n`;
+    const rows = sealed.map((line) => this.client.payLine(line, gasFee, ctx, feeBps));
+    await this.cover(
+      rows.reduce((sum, row) => sum + parseUsd(row.amount as string, ctx.decimals), 0n),
+      ctx,
+    );
+    const content = `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`;
 
     const file = await this.client.uploadFile("batch.jsonl", "batch", content);
     const create: Record<string, unknown> = {
@@ -558,9 +570,7 @@ export class Batches {
    * will actually be charged, and every other line in the batch is charged the
    * same fee in the same block.
    *
-   * **Only `gas_fee` and `fee_bps` are read out of this quote.** The token and
-   * the payee each authorization names come from the chain context and never
-   * from here, which is what keeps a node from naming what a signature approves.
+   * **Only `gas_fee` and `fee_bps` are read out of this quote.**
    */
   /**
    * Provider and rates for every line, from the coordinator's plan.
@@ -808,6 +818,27 @@ export class Batches {
     return picks;
   }
 
+  /**
+   * Make the prepaid balance cover `total` — what every line locks, summed —
+   * before the file is uploaded: one deposit for the shortfall, or with
+   * `autoDeposit: false` an `InsufficientBalance` and nothing uploaded.
+   */
+  private async cover(total: bigint, ctx: ChainContext): Promise<void> {
+    const funds = await this.client.balance();
+    const available = parseUsd(funds.available, ctx.decimals);
+    if (total <= available) return;
+    const shortfall = formatUsd(total - available, ctx.decimals);
+    if (!this.client.autoDeposit) {
+      const required = formatUsd(total, ctx.decimals);
+      throw new InsufficientBalance(
+        `the prepaid balance holds $${funds.available} and this batch locks $${required}; ` +
+          `deposit at least $${shortfall} (client.deposit) and submit again. Nothing was uploaded`,
+        { balance: funds.available, required, shortfall },
+      );
+    }
+    await this.client.deposit(shortfall);
+  }
+
   private async fees(
     line: SealedLine,
     ctx: ChainContext,
@@ -839,13 +870,10 @@ export class Batches {
     // **Own properties only on the 402 body and on its quote block** (`own.ts`),
     // and this is the sharpest application of the rule in the package: both
     // values flow to `payLine`, where `amount = cap + cap*feeBps/10000 + gasFee`
-    // is **the value every line in this batch puts a signature over**.
+    // is what every line locks, and their sum is what this batch may deposit.
     //
     // Read bare, the refusal below is answered by the same prototype that
-    // supplies the value, so it does not fire. Measured against a freshly built
-    // `dist/` on the unguarded file: *refusal thrown: NONE; signed
-    // authorization value: 1000000000000000000000000* — every line authorized
-    // for a number no quote ever named.
+    // supplies the value, so it does not fire.
     const quote =
       typeof body === "object" && body !== null
         ? own(body as Record<string, unknown>, "quote")

@@ -32,7 +32,11 @@ never a rate above the ceiling on that side. Set it too low and no provider matc
 [rests](#how-the-rates-are-chosen) and may expire without being served.
 
 Submissions are always sealed: a client missing its `signer` or `cipher` raises
-`ValidationError` before anything is sent. The returned handle is described in
+`ValidationError` before anything is sent. The job is paid from the wallet's
+[prepaid balance](../concepts/pricing-and-payment.md#the-prepaid-balance): when it is short,
+`submit` deposits the quoted shortfall plus the deposit fee first, with one gasless wallet
+signature, or, on a client built with `autoDeposit: false`, raises
+[`InsufficientBalance`](./errors.md#insufficientbalance) with nothing posted. The returned handle is described in
 [Jobs and results](./jobs-and-results.md); the steps a submission runs are in
 [Job lifecycle](../concepts/job-lifecycle.md#what-a-submission-does).
 
@@ -207,12 +211,13 @@ client-side size cap; the coordinator's own limits apply.
 
 ```ts
 client.sealLine(args: SealLineArgs): Promise<SealedLine>
-client.payLine(line: SealedLine, gasFee: bigint, ctx: ChainContext, feeBps: bigint): Promise<Record<string, unknown>>
+client.payLine(line: SealedLine, gasFee: bigint, ctx: ChainContext, feeBps: bigint): Record<string, unknown>
 ```
 
 The two halves `batches.submit` is built from, public for callers assembling a batch file by
-hand. `sealLine` seals one payload and signs its order; `payLine` signs the payment for it
-(`cap + floor(cap × feeBps / 10000) + gasFee`) and returns the flat JSONL row. Pass the same
+hand. `sealLine` seals one payload and signs its order; `payLine` prices it
+(`amount = cap + floor(cap × feeBps / 10000) + gasFee`, what the line locks) and returns the flat
+JSONL row; it signs nothing. A hand-built file is funded by `client.deposit` before its upload. Pass the same
 `args.memo` (`{ records: new Map(), modelIds: new Map() }`) to every `sealLine` of one file and
 each provider's registry record and each model's id is read once. Prefer `submit` for a job and
 `batches.submit` for a file.
